@@ -5,16 +5,22 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
+from aiogram.types import (CallbackQuery, ChatMemberUpdated, Message,
+                           MessageReactionUpdated)
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import settings as app_settings
 from ..core.errors import safe_delete, safe_restrict, safe_send
 from ..core.normalization import to_persian_digits
 from ..db.models import Chat
 from ..services import antiraid, captcha, connection as connection_service
+from ..services import gban as gban_service
+from ..services import leave_guard
+from ..services import roster as roster_service
 from ..services import moderation as mod
 from ..services import welcome as welcome_service
-from ..services.chat_state import get_or_create_chat, get_or_create_user, get_settings
+from ..services.chat_state import (get_or_create_chat, get_or_create_user, get_settings,
+                                   get_settings_cached)
 from ..services.moderation import MUTE_PERMISSIONS
 
 router = Router(name="members")
@@ -40,6 +46,39 @@ async def _raid_check(message: Message, session: AsyncSession, bot: Bot, joined)
                 parse_mode="HTML")
 
 
+async def _joined_at(session: AsyncSession, chat_id: int, user_id: int):
+    """When did this member join? (needed by the quick-leave rule)."""
+    from ..db.models import ChatMemberState
+    from ..services.chat_state import get_member_state
+
+    state = await get_member_state(session, chat_id, user_id, create=False)
+    return getattr(state, "joined_at", None) if state is not None else None
+
+
+async def _leave_guard(bot: Bot, session: AsyncSession, chat_id: int, user,
+                       settings: dict, joined_at) -> None:
+    """Ban members who leave, and explain it with one-tap undo buttons."""
+    if not leave_guard.is_enabled(settings):
+        return
+    reason = await leave_guard.check_leave(bot, chat_id, user.id, settings, joined_at)
+    if reason is None:
+        return
+    from ..keyboards.factory import cb, markup, primary, row, success
+
+    rule = "ban_on_leave" if settings.get("ban_on_leave") else "quick_leave_ban"
+    name = (user.full_name or "").strip() or str(user.id)
+    text = ("🚪 <b>قفل خروج</b>\n\n"
+            f"<a href=\"tg://user?id={user.id}\">{name}</a> گروه را ترک کرد و "
+            f"طبق تنظیمات بن شد.\n"
+            f"📌 دلیل: {reason}")
+    keyboard = markup([
+        [success("↩️ رفع بن", cb("undo", "unban", user.id)),
+         primary("⛔️ خاموش کردن این قانون", cb("lg", "off", rule))],
+        row(primary("🏠 پنل", cb("nav", "home"))),
+    ])
+    await safe_send(bot, chat_id, text, parse_mode="HTML", reply_markup=keyboard)
+
+
 @router.message(F.new_chat_members)
 async def on_new_members(message: Message, session: AsyncSession, bot: Bot) -> None:
     chat = await get_or_create_chat(session, message.chat)
@@ -57,6 +96,18 @@ async def on_new_members(message: Message, session: AsyncSession, bot: Bot) -> N
         await get_or_create_user(session, user)
         await welcome_service.record_join(session, message.chat.id, user)
         await _raid_check(message, session, bot, user)
+
+        # Global ban (owner feature, OFF by default) - works in groups too
+        if app_settings.global_ban_enabled:
+            gb_reason = await gban_service.is_banned(session, user.id)
+            if gb_reason is not None:
+                await gban_service.enforce(
+                    bot, session, chat_id=message.chat.id,
+                    chat_title=message.chat.title or "", user_id=user.id,
+                    user_name=user.full_name or "", reason=gb_reason,
+                    message_id=message.message_id,
+                    clean=bool(settings_obj.clean_join))
+                continue
 
         # Federation enforcement
         if settings_obj.federation_id and settings_obj.fed_enforce:
@@ -93,6 +144,41 @@ async def on_new_members(message: Message, session: AsyncSession, bot: Bot) -> N
                                            member_count=chat.member_count or 0)
 
 
+@router.chat_member()
+async def on_chat_member(update: ChatMemberUpdated, session: AsyncSession, bot: Bot) -> None:
+    """A member status changed - used to enforce the global ban in every chat.
+
+    Telegram only sends these updates to administrators, which is exactly the
+    situation a global ban needs (groups **and** channels the bot guards).
+    """
+    old, new = update.old_chat_member, update.new_chat_member
+    if old is None or new is None:
+        return
+    user = new.user
+    if user is None or user.id == bot.id:
+        return
+
+    # Every status change teaches the bot about a member (somebody who is
+    # muted, promoted or restricted is often a member who never speaks).
+    await roster_service.remember(
+        session, update.chat.id, user,
+        status=("left" if new.status in {"left", "kicked"} else new.status),
+        left=new.status in {"left", "kicked"})
+
+    if not app_settings.global_ban_enabled:
+        return
+    joined = old.status in {"left", "kicked"} and new.status in {
+        "member", "administrator", "creator", "restricted"}
+    if not joined:
+        return
+    reason = await gban_service.is_banned(session, user.id)
+    if reason is None:
+        return
+    await gban_service.enforce(bot, session, chat_id=update.chat.id,
+                               chat_title=update.chat.title or "", user_id=user.id,
+                               user_name=user.full_name or "", reason=reason)
+
+
 @router.message(F.left_chat_member)
 async def on_left_member(message: Message, session: AsyncSession, bot: Bot) -> None:
     settings_obj = await get_settings(session, message.chat.id)
@@ -105,14 +191,16 @@ async def on_left_member(message: Message, session: AsyncSession, bot: Bot) -> N
             chat.is_active = False
         await connection_service.drop_chat(session, message.chat.id)
         return
+    chat_settings = await get_settings_cached(session, message.chat.id)
+    joined_at = await _joined_at(session, message.chat.id, user.id)
     await welcome_service.record_leave(session, message.chat.id, user.id)
     if settings_obj.clean_leave:
         await safe_delete(bot, message.chat.id, message.message_id, context="clean_leave")
     if settings_obj.goodbye_enabled:
         await welcome_service.send_goodbye(bot, session, chat_id=message.chat.id, user=user,
                                            chat_title=message.chat.title or "")
-    if settings_obj.clean_leave and settings_obj.goodbye_enabled:
-        pass
+    await _leave_guard(bot, session, chat_id=message.chat.id, user=user,
+                       settings=chat_settings, joined_at=joined_at)
 
 
 @router.message(F.pinned_message | F.new_chat_title | F.new_chat_photo |
@@ -141,6 +229,24 @@ async def on_my_chat_member(update: ChatMemberUpdated, session: AsyncSession, bo
     await session.flush()
 
 
+@router.message_reaction()
+async def on_message_reaction(update: MessageReactionUpdated, session: AsyncSession,
+                              bot: Bot) -> None:
+    """A reaction tells us who is here - even members who never write."""
+    user = getattr(update, "user", None)
+    if user is None and getattr(update, "actor_chat", None) is not None:
+        return  # a channel reacted, not a member we could mention
+    await roster_service.remember(session, update.chat.id, user)
+    if not app_settings.global_ban_enabled or user is None:
+        return
+    reason = await gban_service.is_banned(session, user.id)
+    if reason is None:
+        return
+    await gban_service.enforce(bot, session, chat_id=update.chat.id,
+                               chat_title=update.chat.title or "", user_id=user.id,
+                               user_name=user.full_name or "", reason=reason)
+
+
 @router.callback_query(F.data.startswith("cap:"))
 async def on_captcha(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
     """CAPTCHA answer: only the target user may answer their own challenge."""
@@ -150,6 +256,9 @@ async def on_captcha(callback: CallbackQuery, session: AsyncSession, bot: Bot) -
     token, index_raw = parts[1], parts[2]
     if not index_raw.isdigit():
         return
+    # Pressing the CAPTCHA button proves this member is here: keep them.
+    if callback.message is not None:
+        await roster_service.remember(session, callback.message.chat.id, callback.from_user)
     solved, message_text = await captcha.solve(bot, session, token=token,
                                                user_id=callback.from_user.id,
                                                choice_index=int(index_raw))

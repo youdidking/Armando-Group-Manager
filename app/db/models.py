@@ -210,6 +210,13 @@ class ChatSettings(Base, TimestampMixin):
     anti_porn_action: Mapped[str] = mapped_column(String(24), default="delete_ban", nullable=False)
     anti_porn_strictness: Mapped[int] = mapped_column(Integer, default=2, nullable=False)  # 1..3
 
+    # ---------------------------------------------------------- leave guard
+    # Ban a member the moment they leave the group (anti leave-and-return).
+    ban_on_leave: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
+    # Ban when somebody joins and leaves again within this many seconds (0=off)
+    quick_leave_ban: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
+    quick_leave_seconds: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+
     # ------------------------------------------------------------------- misc
     night_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
     night_start: Mapped[str] = mapped_column(String(8), default="01:00", nullable=False)

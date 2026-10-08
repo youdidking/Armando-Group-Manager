@@ -108,6 +108,22 @@ async def get_session() -> AsyncIterator[AsyncSession]:
             raise
 
 
+# Columns introduced after the first release: added idempotently so that
+# existing PostgreSQL / SQLite databases keep working without a manual step.
+RUNTIME_FIXUPS: tuple[tuple[str, str, str], ...] = (
+    ("chat_settings", "ban_on_leave", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("chat_settings", "quick_leave_ban", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("chat_settings", "quick_leave_seconds", "INTEGER NOT NULL DEFAULT 10"),
+)
+
+
+async def _apply_runtime_fixups(engine) -> None:
+    from .migrate import add_column
+
+    for table, column, ddl in RUNTIME_FIXUPS:
+        await add_column(engine, table, column, ddl)
+
+
 async def init_db() -> None:
     """Create missing tables and apply pending migrations."""
     from .migrate import run_migrations
@@ -116,6 +132,7 @@ async def init_db() -> None:
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await run_migrations(eng)
+    await _apply_runtime_fixups(eng)
     logger.info("database ready: %s", settings.sqlalchemy_url.split("://")[0])
 
 

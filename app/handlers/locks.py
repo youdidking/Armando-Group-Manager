@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from ..core.normalization import normalize_text, to_persian_digits
+from ..core.normalization import normalize_digits, normalize_text, to_persian_digits
 from ..services import chatlock
 from ..services import locks as lock_service
 from ..services.chat_state import get_settings, invalidate_settings
@@ -257,3 +257,89 @@ async def cmd_group_lock_status(ctx: CommandContext) -> None:
         return
     state = await chatlock.chat_lock_state(ctx.bot, ctx.chat_id)
     await ctx.reply(f"🔒 <b>وضعیت قفل گروه</b>\n\n{chatlock.MODE_LABELS[state]}")
+
+
+# --------------------------------------------------------------------------- #
+# «قفل خروج» - automatic ban on leave
+# --------------------------------------------------------------------------- #
+def _on_off(args: list[str], current: bool) -> bool:
+    text = " ".join(args).strip()
+    lowered = normalize_text(text, mode="command")
+    if "روشن" in lowered or "فعال" in lowered:
+        return True
+    if "خاموش" in lowered or "غیرفعال" in lowered:
+        return False
+    return not current
+
+
+async def _set_leave_flag(ctx: CommandContext, field: str, label: str) -> None:
+    from ..services.chat_state import get_settings, invalidate_settings
+
+    if not await require(ctx, role="admin", permission="manage"):
+        return
+    settings_obj = await get_settings(ctx.session, ctx.chat_id)
+    value = _on_off(ctx.args, bool(getattr(settings_obj, field, False)))
+    setattr(settings_obj, field, value)
+    invalidate_settings(ctx.chat_id)
+    await ctx.session.flush()
+    state = "✅ روشن" if value else "⛔️ خاموش"
+    await ctx.reply(f"🚪 {label}: {state}\n\n{leave_status_line(ctx.settings | {field: value})}")
+
+
+def leave_status_line(settings: dict) -> str:
+    from ..services.leave_guard import status_text
+
+    return status_text(settings)
+
+
+@command("قفل خروج", "بن خروج", "بن خودکار خروج", "بن هنگام خروج",
+         role="admin", permission="manage", category="locks",
+         description="بن خودکار هر کاربری که گروه را ترک کند",
+         usage="قفل خروج [روشن|خاموش]")
+async def cmd_ban_on_leave(ctx: CommandContext) -> None:
+    await _set_leave_flag(ctx, "ban_on_leave", "بن هنگام خروج")
+
+
+@command("بن خروج سریع", "قفل خروج سریع", "تنظیم خروج سریع",
+         role="admin", permission="manage", category="locks",
+         description="بن کاربری که بلافاصله پس از ورود خارج می‌شود",
+         usage="بن خروج سریع ۱۰")
+async def cmd_quick_leave_ban(ctx: CommandContext) -> None:
+    from ..core.duration import parse_duration
+    from ..services.chat_state import get_settings, invalidate_settings
+
+    if not await require(ctx, role="admin", permission="manage"):
+        return
+    settings_obj = await get_settings(ctx.session, ctx.chat_id)
+    seconds: int | None = None
+    for token in ctx.args:
+        digits = "".join(ch for ch in normalize_digits(token, to="ascii") if ch.isdigit())
+        if digits:
+            seconds = int(digits)
+            break
+        parsed = parse_duration(token)
+        if parsed:
+            seconds = int(parsed)
+            break
+    if seconds is None:
+        seconds = 0 if settings_obj.quick_leave_ban else 10
+    seconds = max(0, min(3600, seconds))
+    settings_obj.quick_leave_seconds = seconds or 10
+    settings_obj.quick_leave_ban = seconds > 0
+    invalidate_settings(ctx.chat_id)
+    await ctx.session.flush()
+    if seconds:
+        await ctx.reply(f"🚪 خروج سریع: اگر کاربری تا {to_persian_digits(str(seconds))} "
+                        f"ثانیه پس از ورود خارج شود، بن می‌شود.")
+    else:
+        await ctx.reply("🚪 قانون «خروج سریع» خاموش شد.")
+
+
+@command("وضعیت خروج", "وضعیت قفل خروج", role="member", category="locks",
+         description="نمایش وضعیت قفل خروج", usage="وضعیت خروج")
+async def cmd_leave_status(ctx: CommandContext) -> None:
+    from ..services.chat_state import get_settings_cached
+
+    settings = await get_settings_cached(ctx.session, ctx.chat_id)
+    await ctx.reply(f"🚪 <b>قفل خروج</b>\n\n{leave_status_line(settings)}\n\n"
+                    "تغییر: <code>قفل خروج</code> • <code>بن خروج سریع ۱۰</code>")

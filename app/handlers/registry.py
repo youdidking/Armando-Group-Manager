@@ -11,10 +11,11 @@ being mistaken for commands:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
-from ..core.normalization import normalize_text
+from ..core.normalization import normalize_digits, normalize_text
 
 logger = logging.getLogger("armando.commands")
 
@@ -186,6 +187,10 @@ def _vocab_validator(vocab: str, token: str) -> bool:
     return False
 
 
+_TARGET_USERNAME_RE = re.compile(r"^@?(?=[A-Za-z0-9_]*[A-Za-z_])[A-Za-z0-9_]{4,32}$")
+_TARGET_ID_RE = re.compile(r"^\d{5,15}$")
+
+
 def args_are_valid(command: Command, args: list[str]) -> bool:
     """Decide whether ``args`` look like real arguments or like a sentence."""
     kind = command.arg_kind or ("none" if not command.usage else "free")
@@ -193,6 +198,13 @@ def args_are_valid(command: Command, args: list[str]) -> bool:
         return True
     if kind == "none":
         return False
+    if kind == "target":
+        # ``لغو سکوت @Parhannni`` / ``لغو سکوت 123456`` / a short name.
+        first = args[0]
+        if _TARGET_USERNAME_RE.match(first) or _TARGET_ID_RE.match(
+                normalize_digits(first, to="ascii")):
+            return len(args) <= 3
+        return len(args) <= 2 and not any(token in SENTENCE_MARKERS for token in args)
     if kind == "numeric":
         return len(args) <= 3 and all(_has_digit(token) for token in args)
     if kind == "keys":
@@ -247,6 +259,22 @@ ARG_RULES: dict[str, tuple[str, str]] = {
     "اقدام شب": ("keys", "action"),
     "ضدفلاود": ("numeric", ""),
     "ضد رید": ("numeric", ""),
+    # ---- commands that act on a member: reply OR @username OR numeric id
+    "بن سراسری": ("free", ""),
+    "رفع بن سراسری": ("target", ""),
+    "رفع بن": ("target", ""),
+    "کیک": ("target", ""),
+    "لغو سکوت": ("target", ""),
+    "کسر اخطار": ("target", ""),
+    "صفر کردن اخطار": ("target", ""),
+    "وضعیت اخطار": ("target", ""),
+    "تاریخچه": ("target", ""),
+    "اطلاعات کاربر": ("target", ""),
+    "حذف تگ": ("target", ""),
+    "ارتقا": ("target", ""),
+    "تنزل": ("target", ""),
+    "دسترسی مدیر": ("target", ""),
+    "عزل": ("target", ""),
 }
 
 _RULE_INDEX: dict[str, tuple[str, str]] = {

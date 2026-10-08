@@ -16,7 +16,8 @@ from aiogram.types import (CallbackQuery, ChatMemberAdministrator, ChatMemberOwn
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.errors import safe_answer, safe_delete, safe_edit
+from ..core import cache
+from ..core.errors import safe_answer, safe_call, safe_delete, safe_edit
 from ..core.normalization import to_persian_digits
 from ..db.models import (
     BotRole,
@@ -283,8 +284,23 @@ async def send_panel(bot: Bot, chat_id: int, user_id: int, session: AsyncSession
     ctx = await _prepare_ctx(session, bot, target_chat_id, user_id, actor, settings, section,
                              chat_title=(chat.title if chat else ""), chat_type="group", **extra)
     text, keyboard = build_panel(section, ctx)
-    await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard,
-                           parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard,
+                                  parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    if sent is not None:
+        remember_panel_owner(chat_id, sent.message_id, user_id)
+
+
+PANEL_TTL = 24 * 60 * 60  # a day is plenty for an interactive panel
+
+
+def remember_panel_owner(chat_id: int, message_id: int, user_id: int) -> None:
+    """Bind a panel message to the admin who opened it."""
+    cache.panel_owner_cache.set((chat_id, message_id), int(user_id))
+
+
+def _panel_owner(chat_id: int, message_id: int) -> int | None:
+    owner = cache.panel_owner_cache.get((chat_id, message_id))
+    return int(owner) if owner is not None else None
 
 
 def _role_key(actor) -> str:
@@ -337,7 +353,9 @@ async def _refresh(callback: CallbackQuery, session: AsyncSession, bot: Bot, cha
                              chat_type=callback.message.chat.type if callback.message else "group",
                              **extra)
     text, keyboard = build_panel(section, ctx)
-    await safe_edit(callback.message, text, reply_markup=keyboard)
+    edited = await safe_edit(callback.message, text, reply_markup=keyboard)
+    if edited is not None and callback.message is not None:
+        remember_panel_owner(chat_id, callback.message.message_id, callback.from_user.id)
 
 
 # --------------------------------------------------------------------------- #
@@ -666,6 +684,70 @@ async def on_warn_action(callback: CallbackQuery, session: AsyncSession, bot: Bo
     await safe_edit(callback.message, text)
 
 
+@router.callback_query(F.data.startswith("locknum:"))
+async def on_lock_number(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    """Change the threshold of a lock (e.g. the 1000 character limit)."""
+    parts = parse_cb(callback.data or "")
+    # locknum:<key>:<field>:<delta>[:<page>]
+    if len(parts) < 4:
+        await safe_answer(callback)
+        return
+    key, field, raw_delta = parts[1], parts[2], parts[3]
+    page = parts[4] if len(parts) > 4 else "links"
+    try:
+        delta = int(raw_delta)
+    except ValueError:
+        await safe_answer(callback)
+        return
+    chat_id = await _panel_chat_id(callback, session)
+    if not await _ensure_admin(callback, bot, chat_id, session):
+        return
+    spec = lock_service.LOCK_REGISTRY.get(key)
+    if spec is None or not spec.threshold:
+        await safe_answer(callback)
+        return
+    locks = await lock_service.get_locks_map(session, chat_id)
+    state = locks.get(key)
+    current = int((state.extra or {}).get(field, spec.default_threshold)) if state \
+        else spec.default_threshold
+    value = max(1, min(100000, current + delta))
+    await lock_service.set_lock(session, chat_id, key,
+                                bool(state.enabled) if state else True,
+                                action=(state.action if state else None),
+                                extra={field: value}, updated_by=callback.from_user.id)
+    await safe_answer(callback, f"✅ {to_persian_digits(str(value))}")
+    await _refresh(callback, session, bot, chat_id, "lock", lock_key=key, lock_page=page)
+
+
+@router.callback_query(F.data.startswith("lg:"))
+async def on_leave_guard(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    """Disable a «قفل خروج» rule straight from the ban notice."""
+    from ..services.chat_state import get_settings, invalidate_settings
+
+    parts = parse_cb(callback.data or "")
+    if len(parts) < 3:
+        await safe_answer(callback)
+        return
+    action, field = parts[1], parts[2]
+    chat_id = await _panel_chat_id(callback, session)
+    if not await _ensure_admin(callback, bot, chat_id, session):
+        return
+    if action != "off" or field not in {"ban_on_leave", "quick_leave_ban"}:
+        await safe_answer(callback)
+        return
+    settings_obj = await get_settings(session, chat_id)
+    setattr(settings_obj, field, False)
+    invalidate_settings(chat_id)
+    await session.flush()
+    await safe_answer(callback, "⛔️ قانون خاموش شد.")
+    if callback.message:
+        label = "بن هنگام خروج" if field == "ban_on_leave" else "بن خروج سریع"
+        await safe_edit(callback.message,
+                        f"⛔️ «{label}» خاموش شد.\n"
+                        f"از این لحظه کسی به‌خاطر خروج بن نمی‌شود.\n\n"
+                        f"برای روشن کردن دوباره: <code>قفل خروج</code>")
+
+
 @router.callback_query(F.data.startswith("undo:"))
 async def on_undo(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
     """Reverse the moderation action the button was attached to."""
@@ -980,3 +1062,28 @@ async def _ensure_admin(callback: CallbackQuery, bot: Bot, chat_id: int,
     await safe_answer(callback, "⛔️ فقط مدیران گروه می‌توانند تنظیمات را تغییر دهند.",
                       show_alert=True)
     return False
+
+
+@router.callback_query.middleware()
+async def panel_owner_middleware(handler, event: CallbackQuery, data: dict):
+    """A panel belongs to the admin who opened it - nobody else may click it.
+
+    Every panel message is remembered when it is sent; clicking it from another
+    account is refused with an alert instead of silently changing the group.
+    """
+    message = getattr(event, "message", None)
+    user = getattr(event, "from_user", None)
+    if message is not None and user is not None:
+        owner = _panel_owner(message.chat.id, message.message_id)
+        if owner is not None and owner != user.id:
+            bot = data.get("bot")
+            if bot is not None:
+                await safe_call(
+                    lambda: bot.answer_callback_query(
+                        callback_query_id=event.id,
+                        text=("\U0001f512 این پنل مخصوص مدیری است که آن را باز کرده است.\n"
+                              "برای پنل خودتان در گروه دستور «پنل» را بزنید."),
+                        show_alert=True),
+                    default=None, context="panel_owner_denied")
+            return None
+    return await handler(event, data)

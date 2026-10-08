@@ -26,6 +26,7 @@ def build_routers() -> list[Router]:
         filters_notes,
         locks,
         members,
+        mention_all,
         messages,
         moderation,
         panel,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -12,6 +13,7 @@ from ..core.normalization import to_persian_digits
 from ..core.timeutils import persian_datetime
 from ..db.models import BanRecord, Chat, ModerationAction, User
 from ..services import federation as fed_service
+from ..services import gban as gban_service
 from ..services.chat_state import invalidate_settings
 from .common import CommandContext, require, user_html
 from .registry import command
@@ -242,6 +244,33 @@ async def cmd_fed_mode(ctx: CommandContext) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Global ban - background rollout
+# --------------------------------------------------------------------------- #
+async def _rollout(bot, user_id: int, reason: str, source_chat_id: int, *,
+                   unban: bool = False) -> None:
+    """Apply (or lift) a global ban in every chat the bot administers."""
+    from ..db import session_scope
+
+    try:
+        async with session_scope() as session:
+            if unban:
+                count = await gban_service.lift_everywhere(bot, session, user_id,
+                                                           skip=source_chat_id)
+                text = (f"🕊 بن سراسری در {to_persian_digits(str(count))} گفتگو برداشته شد.")
+            else:
+                count = await gban_service.enforce_everywhere(bot, session, user_id, reason,
+                                                              skip=source_chat_id)
+                text = (f"🌍 بن سراسری در {to_persian_digits(str(count))} گفتگوی دیگر اعمال شد."
+                        if count else "")
+    except Exception:  # noqa: BLE001 - a background job must never crash the bot
+        logger.exception("gban rollout failed user=%s", user_id)
+        return
+    if text:
+        from ..core.errors import safe_send
+
+        await safe_send(bot, source_chat_id, text, parse_mode="HTML")
+
+# --------------------------------------------------------------------------- #
 # Owner only (global features are OFF unless explicitly enabled)
 # --------------------------------------------------------------------------- #
 @command("بن سراسری", role="founder", category="owner", description="بن سراسری (مالک ربات)",
@@ -258,7 +287,7 @@ async def cmd_global_ban(ctx: CommandContext) -> None:
     if not user_id:
         await ctx.reply("❌ کاربر هدف مشخص نشد.")
         return
-    _, _, reason = ctx.duration_and_reason(target.rest if target else [])
+    _, reason = ctx.duration_and_reason(target.rest if target else [])
     user = await ctx.session.get(User, user_id)
     if user is None:
         user = User(id=user_id, first_name="")
@@ -270,7 +299,20 @@ async def cmd_global_ban(ctx: CommandContext) -> None:
                               reason=user.global_ban_reason, scope="global", active=True,
                               created_at=datetime.utcnow()))
     await ctx.session.flush()
-    await ctx.reply(f"🌍 کاربر <code>{user_id}</code> به‌صورت سراسری بن شد.\n📌 {user.global_ban_reason}")
+    gban_service.invalidate(user_id)
+
+    # Ban here and now, then roll it out to every other guarded chat.
+    here = await gban_service.ban_in_chat(ctx.bot, ctx.chat_id, user_id)
+    await ctx.reply(
+        f"🌍 کاربر <code>{user_id}</code> به‌صورت سراسری بن شد.\n"
+        f"📌 {user.global_ban_reason}\n"
+        + ("✅ در این گفتگو هم بن شد.\n" if here else "")
+        + "↻ اعمال در بقیهٔ گروه‌ها و کانال‌ها در پس‌زمینه انجام می‌شود.")
+
+    async def _later() -> None:
+        await _rollout(ctx.bot, user_id, user.global_ban_reason or "بدون دلیل", ctx.chat_id)
+
+    asyncio.create_task(_later())
 
 
 @command("رفع بن سراسری", role="founder", category="owner",
@@ -300,7 +342,13 @@ async def cmd_global_unban(ctx: CommandContext) -> None:
         update(BanRecord).where(BanRecord.scope == "global", BanRecord.user_id == user_id)
         .values(active=False))
     await ctx.session.flush()
+    gban_service.invalidate(user_id)
     await ctx.reply(f"🕊 بن سراسری کاربر <code>{user_id}</code> برداشته شد.")
+
+    async def _later() -> None:
+        await _rollout(ctx.bot, user_id, "", ctx.chat_id, unban=True)
+
+    asyncio.create_task(_later())
 
 
 @command("لیست بن سراسری", role="founder", category="owner",

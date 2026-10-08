@@ -83,6 +83,10 @@ REPEAT_RE = re.compile(r"(.)\1{2,}")
 PERSIAN_LETTER_RE = re.compile(r"[\u0621-\u064a\u067e\u0686\u0698\u06a9\u06af\u06cc\u06c0]")
 LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
 CYRILLIC_RE = re.compile(r"[\u0400-\u04ff]")
+# CJK ideographs + CJK punctuation (Chinese / Han based writing)
+CJK_RE = re.compile(r"[\u2e80-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]")
+# Devanagari + Devanagari extended (Hindi, Marathi, Nepali, Sanskrit)
+DEVANAGARI_RE = re.compile(r"[\u0900-\u097f\ua8e0-\ua8ff]")
 
 URL_RE = re.compile(
     r"(?:(?:https?://|ftp://|www\.)[^\s<>\[\]{}]+"
@@ -307,6 +311,14 @@ def has_latin(text: str) -> bool:
 
 def has_cyrillic(text: str) -> bool:
     return bool(CYRILLIC_RE.search(text or ""))
+
+
+def has_chinese(text: str) -> bool:
+    return bool(CJK_RE.search(text or ""))
+
+
+def has_devanagari(text: str) -> bool:
+    return bool(DEVANAGARI_RE.search(text or ""))
 
 
 def has_command(text: str) -> bool:

@@ -23,6 +23,7 @@ from aiogram import Bot, F, Router
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import settings as app_settings
 from ..core.errors import safe_delete
 from ..core.normalization import normalize_text
 from ..db.models import User
@@ -31,6 +32,7 @@ from ..services import (
     antiflood,
     entertainment,
     filters as filter_service,
+    gban as gban_service,
     locks as lock_service,
     moderation as mod,
     permissions,
@@ -81,7 +83,10 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
     chat = message.chat
     if user is None:
         return
-    if user.is_bot:
+    # Messages posted **as a channel** carry ``sender_chat``; they must reach
+    # the lock engine (ordinary bot messages are still ignored).
+    sender_chat = getattr(message, "sender_chat", None)
+    if user.is_bot and sender_chat is None:
         return
 
     await get_or_create_chat(session, chat)
@@ -94,7 +99,22 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
     await touch_activity(session, chat.id, user.id, media=is_media)
     await record_message(session, chat.id, user.id, media=is_media)
 
+    # ------------------------------------------------- global ban (owner level)
+    if app_settings.global_ban_enabled:
+        gb_reason = await gban_service.is_banned(session, user.id)
+        if gb_reason is not None:
+            await gban_service.enforce(
+                bot, session, chat_id=chat.id, chat_title=chat.title or "",
+                user_id=user.id, user_name=user.full_name or "", reason=gb_reason,
+                message_id=message.message_id, clean=True)
+            return
+
     actor = await permissions.build_actor(bot, chat.id, user.id, session=session)
+    if sender_chat is not None:
+        # A channel post is never an administrator action: treat the sender as
+        # an ordinary member so the lock engine may act on it.
+        actor = permissions.Actor(user_id=user.id, chat_id=chat.id, telegram_status="member",
+                                  rights_known=False)
 
     # ------------------------------------------------------------------ AFK
     if settings.get("afk_enabled", True):
@@ -163,6 +183,8 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
             if "حذف" not in result:
                 logger.debug("lock action result: %s", result)
             return
+        if sender_chat is not None:
+            return  # nothing else applies to a channel post
 
     # ------------------------------------------------------------- blocklist
     if not actor.bypasses("filters"):

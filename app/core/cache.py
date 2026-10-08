@@ -121,6 +121,8 @@ CACHES: list[TTLCache] = []
 
 chat_settings_cache = TTLCache(maxsize=4096, default_ttl=180.0, name="chat_settings")
 admin_rights_cache = TTLCache(maxsize=8192, default_ttl=120.0, name="admin_rights")
+# panel message -> the user who opened it (an exclusive, per-admin panel)
+panel_owner_cache = TTLCache(maxsize=8192, default_ttl=86400.0, name="panel_owner")
 member_status_cache = TTLCache(maxsize=16384, default_ttl=120.0, name="member_status")
 filter_cache = TTLCache(maxsize=2048, default_ttl=120.0, name="filters")
 lock_cache = TTLCache(maxsize=2048, default_ttl=120.0, name="locks")
@@ -128,7 +130,8 @@ market_cache = TTLCache(maxsize=256, default_ttl=float(settings.market_cache_ttl
 role_cache = TTLCache(maxsize=16384, default_ttl=90.0, name="roles")
 afk_cache = TTLCache(maxsize=4096, default_ttl=300.0, name="afk")
 
-for _c in (chat_settings_cache, admin_rights_cache, member_status_cache, filter_cache,
+for _c in (chat_settings_cache, admin_rights_cache, panel_owner_cache, member_status_cache,
+           filter_cache,
            lock_cache, market_cache, role_cache, afk_cache):
     CACHES.append(_c)
 

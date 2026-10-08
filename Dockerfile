@@ -22,9 +22,9 @@ COPY . .
 
 RUN mkdir -p /app/data /app/logs && useradd -m -u 10001 armando \
  && chown -R armando:armando /app
+USER armando
 
-
-
+VOLUME ["/app/data"]
 
 EXPOSE 8080
 

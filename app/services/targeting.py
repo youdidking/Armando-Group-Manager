@@ -17,7 +17,9 @@ from ..db.models import ChatMemberState
 
 logger = logging.getLogger("armando.targeting")
 
-USERNAME_RE = re.compile(r"^@?([A-Za-z0-9_]{4,32})$")
+# A username always contains a letter or an underscore - otherwise the token is
+# a numeric user id and must not be looked up as a username.
+USERNAME_RE = re.compile(r"^@?(?=[A-Za-z0-9_]*[A-Za-z_])([A-Za-z0-9_]{4,32})$")
 ID_RE = re.compile(r"^\d{5,15}$")
 
 
@@ -183,16 +185,7 @@ async def resolve_target(bot: Bot, session: AsyncSession, message: Message,
     first = args[0]
     normalized_first = normalize_digits(first, to="ascii")
 
-    # C) @username
-    match = USERNAME_RE.match(first)
-    if match:
-        resolved = await _resolve_username(bot, session, message.chat.id, match.group(1))
-        if resolved:
-            resolved.rest = args[1:]
-            return resolved
-        return TargetResult(error=f"❌ کاربر <code>@{match.group(1)}</code> پیدا نشد.")
-
-    # D) numeric id
+    # C) numeric id (checked first: a pure digit token is never a username)
     if ID_RE.match(normalized_first):
         user_id = int(normalized_first)
         from ..db.models import User
@@ -211,6 +204,15 @@ async def resolve_target(bot: Bot, session: AsyncSession, message: Message,
         except Exception:  # noqa: BLE001
             return TargetResult(user_id=user_id, first_name=f"کاربر {user_id}",
                                 source="id", rest=args[1:])
+
+    # D) @username
+    match = USERNAME_RE.match(first)
+    if match:
+        resolved = await _resolve_username(bot, session, message.chat.id, match.group(1))
+        if resolved:
+            resolved.rest = args[1:]
+            return resolved
+        return TargetResult(error=f"❌ کاربر <code>@{match.group(1)}</code> پیدا نشد.")
 
     # E) ambiguous: name search
     candidates = await _resolve_name(bot, session, message.chat.id, args[:2])

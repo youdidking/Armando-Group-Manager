@@ -17,10 +17,13 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core import cache
+from ..core.errors import safe_delete
 from ..core.normalization import (
     count_emojis,
     count_mentions,
+    has_chinese,
     has_cyrillic,
+    has_devanagari,
     has_hashtag,
     has_latin,
     has_persian,
@@ -202,6 +205,27 @@ def _d_long(m, s: LockState) -> bool:
     return len(_text_of(m)) > limit
 
 
+def _d_chinese(m, s: LockState) -> bool:
+    return has_chinese(_text_of(m))
+
+
+def _d_hindi(m, s: LockState) -> bool:
+    return has_devanagari(_text_of(m))
+
+
+def _d_russian(m, s: LockState) -> bool:
+    return has_cyrillic(_text_of(m))
+
+
+def _d_anonymous(m, s: LockState) -> bool:
+    """Messages posted **as a channel** (the anonymous sender of a group).
+
+    A hidden group admin is a real administrator and stays exempt; Telegram
+    only hides their name, so there is nothing to restrict there either.
+    """
+    return getattr(m, "sender_chat", None) is not None
+
+
 def _d_reply(m, s: LockState) -> bool:
     return m.reply_to_message is not None
 
@@ -291,8 +315,18 @@ LOCK_REGISTRY: dict[str, LockSpec] = {
                    threshold_field="max_emoji", default_threshold=5, group="text"),
     "mention_spam": _spec("mention_spam", "منشن زیاد", "📣", _d_mention_spam, threshold=True,
                           threshold_field="max_mentions", default_threshold=3, group="text"),
-    "long": _spec("long", "پیام طولانی", "📏", _d_long, threshold=True,
+    "long": _spec("long", "پیام طولانی", "📏", _d_long, default_action="delete_mute", threshold=True,
                   threshold_field="max_length", default_threshold=1000, group="text"),
+    # ---- language locks (requested: Chinese / Russian / Hindi)
+    "chinese": _spec("chinese", "زبان چینی", "🇨🇳", _d_chinese, default_action="delete_mute",
+                     group="text"),
+    "russian": _spec("russian", "زبان روسی", "🇷🇺", _d_russian, default_action="delete_mute",
+                     group="text"),
+    "hindi": _spec("hindi", "زبان هندی", "🇮🇳", _d_hindi, default_action="delete_mute",
+                   group="text"),
+    # ---- anonymous senders (channel posts / hidden admins)
+    "anonymous": _spec("anonymous", "ارسال با کانال/ناشناس", "🕵️", _d_anonymous,
+                       default_action="delete_mute", group="text"),
 }
 
 LOCK_GROUPS: dict[str, str] = {
@@ -413,6 +447,47 @@ async def check_message(message: Message, locks: dict[str, LockState]) -> Option
     return None
 
 
+def _is_anonymous_admin(user) -> bool:
+    from .permissions import ANONYMOUS_ADMIN_IDS
+
+    return user.id in ANONYMOUS_ADMIN_IDS or bool(getattr(user, "is_anonymous_admin", False))
+
+
+async def _punish_sender_chat(bot: Bot, session: AsyncSession, *, chat_id: int,
+                              sender_chat_id: int, name: str, action: str,
+                              duration: int | None, message_id: int | None,
+                              reason: str = "") -> str:
+    """Delete + (temporarily) ban a channel that posts into the group."""
+    from datetime import datetime, timedelta
+
+    from ..core.errors import safe_call, safe_delete
+
+    await safe_delete(bot, chat_id, message_id, context="lock_delete")
+    action = (action or "delete").lower().replace("delete_", "")
+    until_date: datetime | None = None
+    if action in {"mute", "temp_mute"}:
+        # A channel cannot be "restricted": a temporary ban is the equivalent.
+        until_date = datetime.utcnow() + timedelta(seconds=int(duration or 3600))
+    elif action in {"ban", "temp_ban"} and duration:
+        until_date = datetime.utcnow() + timedelta(seconds=int(duration))
+    elif action not in {"ban", "temp_ban", "kick", "mute", "temp_mute"}:
+        return "🗑 پیام حذف شد."
+
+    banned = await safe_call(
+        lambda: bot.ban_chat_sender_chat(chat_id=chat_id, sender_chat_id=sender_chat_id,
+                                         until_date=until_date),
+        default=None, context="ban_sender_chat", log=True)
+    if banned is None:
+        return "🗑 پیام حذف شد (امکان مسدود کردن کانال وجود نداشت)."
+    if action == "kick":
+        await safe_call(
+            lambda: bot.unban_chat_sender_chat(chat_id=chat_id, sender_chat_id=sender_chat_id),
+            default=None, context="unban_sender_chat")
+        return f"📢 ارسال‌کنندهٔ ناشناس «{name}» از گروه اخراج شد."
+    label = "مسدود" if until_date is None else "موقتاً مسدود"
+    return f"📢 ارسال‌کنندهٔ ناشناس «{name}» {label} شد."
+
+
 async def apply_violation(bot: Bot, session: AsyncSession, *, message: Message,
                           violation: Violation, chat_title: str = "", reason: str = "") -> str:
     """Punish a lock violation using the shared action engine."""
@@ -421,6 +496,22 @@ async def apply_violation(bot: Bot, session: AsyncSession, *, message: Message,
 
     actor = await get_bot_actor(bot, message.chat.id)
     user = message.from_user
+
+    # A channel (or a hidden admin) cannot be "restricted": the only thing
+    # Telegram offers is banChatSenderChat, so use it for every punishment
+    # that is stronger than a simple delete.
+    sender_chat = getattr(message, "sender_chat", None)
+    if sender_chat is not None:
+        return await _punish_sender_chat(bot, session, chat_id=message.chat.id,
+                                         sender_chat_id=sender_chat.id,
+                                         name=getattr(sender_chat, "title", "") or "کانال",
+                                         action=violation.action, duration=violation.duration,
+                                         message_id=message.message_id, reason=reason)
+    if user is not None and _is_anonymous_admin(user):
+        # Anonymous group admins cannot be muted by the bot either.
+        await safe_delete(bot, message.chat.id, message.message_id, context="lock_delete")
+        return "🗑 پیام ناشناس حذف شد (مدیر ناشناس قابل محدود کردن نیست)."
+
     target_id = user.id if user else message.chat.id
     target_name = user.full_name if user else "ناشناس"
     return await apply_action(
@@ -459,7 +550,10 @@ def normalize_lock_key(text: str) -> str | None:
         "نظرسنجی": "poll", "تاس": "dice", "بازی": "game", "پرداخت": "invoice",
         "استوری": "story", "ربات": "bots", "رباتها": "bots", "دستور": "command",
         "تلفن": "phone", "شماره": "phone", "فارسی": "persian", "انگلیسی": "english",
-        "سیریلیک": "cyrillic", "روسی": "cyrillic", "فحش": "profanity", "فحاشی": "profanity",
+        "سیریلیک": "cyrillic", "روسی": "russian", "روس": "russian", "چینی": "chinese",
+        "چین": "chinese", "کانتیز": "chinese", "هندی": "hindi", "هند": "hindi",
+        "ناشناس": "anonymous", "کانال": "anonymous", "ارسال با کانال": "anonymous",
+        "فحش": "profanity", "فحاشی": "profanity",
         "پورن": "porn", "مستهجن": "porn", "ایموجی": "emoji", "منشن زیاد": "mention_spam",
         "طولانی": "long", "ویدیوپیام": "video_note", "ویس پیام": "video_note",
     }
