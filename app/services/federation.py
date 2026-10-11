@@ -160,9 +160,17 @@ async def fban(session: AsyncSession, bot: Bot, fed: Federation, *, user_id: int
 
     applied = 0
     if enforce:
-        for chat_id in await fed_chats(session, fed):
-            settings_obj = await session.get(ChatSettings, chat_id)
-            if settings_obj is None or not settings_obj.fed_enforce:
+        chat_ids = await fed_chats(session, fed)
+        # One bulk read instead of a SELECT per member chat.
+        enforcing: set[int] = set()
+        if chat_ids:
+            rows = (await session.execute(
+                select(ChatSettings.chat_id).where(
+                    ChatSettings.chat_id.in_(list(chat_ids)),
+                    ChatSettings.fed_enforce.is_(True)))).scalars().all()
+            enforcing = {int(row) for row in rows}
+        for chat_id in chat_ids:
+            if chat_id not in enforcing:
                 continue
             ok = await safe_ban(bot, chat_id, user_id, until_date=until, context="fban_enforce")
             if ok:

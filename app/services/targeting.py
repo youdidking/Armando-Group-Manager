@@ -81,37 +81,35 @@ async def _resolve_username(bot: Bot, session: AsyncSession, chat_id: int,
                             username: str) -> TargetResult | None:
     username = username.lstrip("@").lower()
 
-    # 1) A member row we already know about.
     from ..db.models import User
 
-    result = await session.execute(select(User).where(User.username.ilike(username)))
-    user = result.scalars().first()
+    # 1) A user row we already know about.
+    #    Telegram usernames are case-insensitive, and the Bot API offers no
+    #    username -> id conversion, so the locally observed index is the only
+    #    reliable source.  Exact match first (index friendly), then lowered.
+    user = (await session.execute(
+        select(User).where(User.username == username).limit(1))).scalars().first()
+    if user is None:
+        from sqlalchemy import func
+
+        user = (await session.execute(
+            select(User).where(func.lower(User.username) == username).limit(1))).scalars().first()
     if user:
         return TargetResult(user_id=user.id, first_name=user.first_name or "",
                             last_name=user.last_name, username=user.username, source="username")
 
-    # 2) Someone the bot has seen in this chat (state table join).
-    result = await session.execute(
-        select(ChatMemberState).where(ChatMemberState.chat_id == chat_id)
-    )
-    states = list(result.scalars().all())
-    for state in states:
-        known = await session.get(User, state.user_id)
-        if known and known.username and known.username.lower() == username:
-            return TargetResult(user_id=known.id, first_name=known.first_name or "",
-                                last_name=known.last_name, username=known.username, source="username")
-    if states:
-        # 3) Resolve through Telegram using the chat administrator list.
-        try:
-            admins = await bot.get_chat_administrators(chat_id=chat_id)
-            for admin in admins:
-                u = admin.user
-                if u.username and u.username.lower() == username:
-                    return TargetResult(user_id=u.id, first_name=u.first_name or "",
-                                        last_name=u.last_name, username=u.username, source="username")
-        except Exception:  # noqa: BLE001
-            pass
-    # 4) Public Telegram resolution (works for users with public usernames).
+    # 2) Resolve through the chat administrator list (one bounded API call).
+    try:
+        admins = await bot.get_chat_administrators(chat_id=chat_id)
+        for admin in admins:
+            u = admin.user
+            if u.username and u.username.lower() == username:
+                return TargetResult(user_id=u.id, first_name=u.first_name or "",
+                                    last_name=u.last_name, username=u.username,
+                                    source="username")
+    except Exception:  # noqa: BLE001
+        pass
+    # 3) Public Telegram resolution (works for users with public usernames).
     try:
         chat = await bot.get_chat(chat_id=f"@{username}")
         if chat and chat.type == ChatType.PRIVATE:
@@ -130,14 +128,16 @@ async def _resolve_name(bot: Bot, session: AsyncSession, chat_id: int,
         return []
     from ..db.models import User
 
+    # One joined query: the old code fetched the states and then issued a
+    # separate SELECT per member (500+ round trips on a busy group).
     result = await session.execute(
-        select(ChatMemberState).where(ChatMemberState.chat_id == chat_id).limit(500)
+        select(User)
+        .join(ChatMemberState, ChatMemberState.user_id == User.id)
+        .where(ChatMemberState.chat_id == chat_id)
+        .limit(500)
     )
     candidates: list[tuple[int, str]] = []
-    for state in result.scalars().all():
-        user = await session.get(User, state.user_id)
-        if not user:
-            continue
+    for user in result.scalars().all():
         full = normalize_text(f"{user.first_name or ''} {user.last_name or ''} {user.username or ''}",
                               mode="command")
         if needle in full:

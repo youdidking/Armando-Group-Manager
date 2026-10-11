@@ -108,10 +108,11 @@ async def cmd_kick(ctx: CommandContext) -> None:
     if not await ensure_bot_admin(ctx, permission="ban"):
         return
     reply_id = ctx.message.reply_to_message.message_id if ctx.message.reply_to_message else None
+    sticky = bool(ctx.settings.get("sticky_ban", True))
     text = await mod.kick_user(ctx.bot, ctx.session, chat_id=ctx.chat_id, actor=ctx.actor,
                                target_id=target.user_id, target_name=target.full_name,
                                reason=reason, delete_message_id=reply_id,
-                               chat_title=ctx.chat_title)
+                               chat_title=ctx.chat_title, sticky=sticky)
     await ctx.reply(text, reply_to=False)
     await ctx.delete_invocation()
 
@@ -136,7 +137,8 @@ async def cmd_mute(ctx: CommandContext) -> None:
     await ctx.delete_invocation()
 
 
-@command("لغو سکوت", "آنمیوت", "رفع سکوت", "باصدا", role="muter", permission="restrict",
+@command("لغو سکوت", "آنمیوت", "رفع سکوت", "باصدا", "حذف سکوت", "برداشتن سکوت",
+         role="muter", permission="restrict",
          category="moderation", description="برداشتن سکوت کاربر")
 async def cmd_unmute(ctx: CommandContext) -> None:
     if not await require(ctx, role="muter", permission="restrict"):

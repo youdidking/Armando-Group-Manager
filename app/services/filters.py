@@ -55,6 +55,12 @@ class RuleView:
     aliases: list[str] = field(default_factory=list)
     response_text: str = ""
     response_type: str = "text"
+    # The media/UI half of a custom response.  These must mirror FilterRule,
+    # otherwise the cached view cannot answer an auto-reply trigger at all.
+    response_file_id: str | None = None
+    response_caption: str | None = None
+    response_buttons: list | None = None
+    replies: list | None = None          # random response sets
     cooldown: int = 0
     hits: int = 0
 
@@ -71,6 +77,10 @@ def _to_view(rule: FilterRule) -> RuleView:
         aliases=list(rule.aliases or []),
         response_text=rule.response_text or "",
         response_type=rule.response_type or "text",
+        response_file_id=rule.response_file_id,
+        response_caption=rule.response_caption,
+        response_buttons=list(rule.response_buttons) if rule.response_buttons else None,
+        replies=list(rule.replies) if rule.replies else None,
         cooldown=int(rule.cooldown or 0),
         hits=int(rule.hits or 0),
     )

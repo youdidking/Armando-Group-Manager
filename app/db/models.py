@@ -217,6 +217,19 @@ class ChatSettings(Base, TimestampMixin):
     quick_leave_ban: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
     quick_leave_seconds: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
 
+    # ------------------------------------------------------ sticky ban (anti rejoin)
+    # When a member is removed (ban / kick) the ban stays in place, so the user
+    # can never come back through an invite link until an admin unbans them.
+    sticky_ban: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
+
+    # ------------------------------------------------------ identity change notices
+    announce_name_change: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
+    announce_username_change: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
+
+    # ------------------------------------------------------- join request handling
+    # Auto-approve «درخواست عضویت» in private groups (needs can_invite_users).
+    auto_approve_join_requests: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
+
     # ------------------------------------------------------------------- misc
     night_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
     night_start: Mapped[str] = mapped_column(String(8), default="01:00", nullable=False)

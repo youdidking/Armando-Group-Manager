@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.types import (CallbackQuery, ChatMemberUpdated, Message,
+from aiogram.types import (CallbackQuery, ChatJoinRequest, ChatMemberUpdated, Message,
                            MessageReactionUpdated)
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,6 +94,22 @@ async def on_new_members(message: Message, session: AsyncSession, bot: Bot) -> N
             continue
 
         await get_or_create_user(session, user)
+
+        # Sticky ban: an active ban blocks every re-entry attempt.
+        chat_guard = await get_settings_cached(session, message.chat.id)
+        if chat_guard.get("sticky_ban", True) and await mod.enforce_sticky_ban(
+                bot, session, message.chat.id, user.id):
+            await safe_send(
+                bot, message.chat.id,
+                f"🔒 <a href=\"tg://user?id={user.id}\">{user.full_name or user.id}</a> "
+                f"بن است و اجازه ورود ندارد.\n"
+                f"برای بازگشت، یک مدیر باید دستور <code>رفع بن</code> را بزند.",
+                parse_mode="HTML")
+            if settings_obj.clean_join:
+                await safe_delete(bot, message.chat.id, message.message_id,
+                                  context="sticky_ban_join")
+            continue
+
         await welcome_service.record_join(session, message.chat.id, user)
         await _raid_check(message, session, bot, user)
 
@@ -165,6 +181,21 @@ async def on_chat_member(update: ChatMemberUpdated, session: AsyncSession, bot: 
         status=("left" if new.status in {"left", "kicked"} else new.status),
         left=new.status in {"left", "kicked"})
 
+    # Sticky ban: somebody who is still banned must never slip back in.
+    rejoined = old.status in {"left", "kicked"} and new.status in {
+        "member", "administrator", "creator", "restricted"}
+    if rejoined:
+        guard = await get_settings_cached(session, update.chat.id)
+        if guard.get("sticky_ban", True) and await mod.enforce_sticky_ban(
+                bot, session, update.chat.id, user.id):
+            await safe_send(
+                bot, update.chat.id,
+                f"🔒 <a href=\"tg://user?id={user.id}\">{user.full_name or user.id}</a> "
+                f"هنوز بن است و دوباره اخراج شد.\n"
+                f"برای بازگشت، یک مدیر باید دستور <code>رفع بن</code> را بزند.",
+                parse_mode="HTML")
+            return
+
     if not app_settings.global_ban_enabled:
         return
     joined = old.status in {"left", "kicked"} and new.status in {
@@ -209,6 +240,49 @@ async def on_left_member(message: Message, session: AsyncSession, bot: Bot) -> N
 async def on_service_message(message: Message, session: AsyncSession, bot: Bot) -> None:
     await welcome_service.maybe_clean_service(bot, session, message, chat_id=message.chat.id,
                                               chat_type=message.chat.type)
+
+
+@router.chat_join_request()
+async def on_join_request(update: ChatJoinRequest, session: AsyncSession,
+                          bot: Bot) -> None:
+    """Auto-approve «درخواست عضویت» when the group enabled it.
+
+    A private group that requires admin approval sends a ``chat_join_request``
+    update for every applicant.  Approving needs the «افزودن کاربران» right.
+    Globally banned users are declined instead of waved through.
+    """
+    settings_obj = await get_settings_cached(session, update.chat.id)
+    if not settings_obj.get("auto_approve_join_requests"):
+        return
+
+    user = update.from_user
+    await get_or_create_user(session, user)
+
+    if app_settings.global_ban_enabled:
+        reason = await gban_service.is_banned(session, user.id)
+        if reason is not None:
+            try:
+                await bot.decline_chat_join_request(chat_id=update.chat.id,
+                                                    user_id=user.id)
+                logger.info("join request declined (global ban) user=%s chat=%s",
+                            user.id, update.chat.id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("decline join request failed: %s", exc)
+            return
+
+    try:
+        await bot.approve_chat_join_request(chat_id=update.chat.id, user_id=user.id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not approve join request user=%s chat=%s: %s",
+                       user.id, update.chat.id, exc)
+        return
+
+    logger.info("join request approved user=%s chat=%s", user.id, update.chat.id)
+    if settings_obj.get("log_enabled") and settings_obj.get("log_chat_id"):
+        await safe_send(bot, settings_obj["log_chat_id"],
+                        f"✅ درخواست عضویت "
+                        f"<a href=\"tg://user?id={user.id}\">{user.full_name or user.id}</a> "
+                        f"به‌طور خودکار پذیرفته شد.", parse_mode="HTML")
 
 
 @router.my_chat_member()

@@ -262,10 +262,11 @@ async def top_users_text(session: AsyncSession, chat_id: int, days: int = 7,
                 "داده‌ای ثبت نشده است.")
     lines = [f"🏆 فعال‌ترین کاربران ({to_persian_digits(str(days))} روز اخیر)", ""]
     medals = ["🥇", "🥈", "🥉"]
+    from .chat_state import display_names
+
+    names = await display_names(session, [row[0] for row in rows])
     for index, (user_id, count) in enumerate(rows, start=1):
-        user = await session.get(User, user_id)
-        name = f"{user.first_name or ''} {user.last_name or ''}".strip() if user else str(user_id)
-        name = name or (f"@{user.username}" if user and user.username else str(user_id))
+        name = names.get(int(user_id)) or str(user_id)
         medal = medals[index - 1] if index <= 3 else f"{to_persian_digits(str(index))}."
         lines.append(f"{medal} {name} — {to_persian_digits(str(count))} پیام")
     return "\n".join(lines)
@@ -278,10 +279,11 @@ async def inactive_users_text(session: AsyncSession, chat_id: int, days: int = 3
         return (f"💤 غیرفعال‌ها ({to_persian_digits(str(days))} روز اخیر)\n\n"
                 "کاربر غیرفعالی در داده‌های ثبت‌شده وجود ندارد.")
     lines = [f"💤 غیرفعال‌ها ({to_persian_digits(str(days))} روز اخیر)", ""]
+    from .chat_state import display_names
+
+    names = await display_names(session, [row[0] for row in rows])
     for user_id, last_seen, count in rows:
-        user = await session.get(User, user_id)
-        name = f"{user.first_name or ''} {user.last_name or ''}".strip() if user else str(user_id)
-        name = name or str(user_id)
+        name = names.get(int(user_id)) or str(user_id)
         last = persian_relative(last_seen) if last_seen else "بدون فعالیت ثبت‌شده"
         lines.append(f"• {name} — آخرین فعالیت: {last} (تعداد پیام: {to_persian_digits(str(count))})")
     lines.append("")

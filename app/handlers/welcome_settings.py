@@ -505,3 +505,73 @@ async def cmd_porn_toggle(ctx: CommandContext) -> None:
                    extra={"strictness": int(settings_obj.anti_porn_strictness or 2)},
                    updated_by=ctx.user_id)
     await ctx.reply(f"{'🟢 ضدپورن فعال شد.' if settings_obj.anti_porn_enabled else '🔴 ضدپورن غیرفعال شد.'}")
+
+
+# --------------------------------------------------------------------------- #
+# Join requests / sticky ban / identity notices
+# --------------------------------------------------------------------------- #
+@command("پذیرش خودکار", "پذیرش خودکار عضویت", "تایید خودکار عضویت", "تأیید خودکار عضویت",
+         role="admin", permission="manage", category="welcome",
+         description="پذیرش خودکار درخواست‌های عضویت در گروه خصوصی",
+         usage="پذیرش خودکار")
+async def cmd_auto_approve(ctx: CommandContext) -> None:
+    if not await require(ctx, role="admin", permission="manage"):
+        return
+    settings_obj = await get_settings(ctx.session, ctx.chat_id)
+    settings_obj.auto_approve_join_requests = not bool(settings_obj.auto_approve_join_requests)
+    invalidate_settings(ctx.chat_id)
+    if settings_obj.auto_approve_join_requests:
+        await ctx.reply("🟢 پذیرش خودکار عضویت فعال شد.\n"
+                        "از این پس درخواست‌های عضویت به‌طور خودکار تایید می‌شوند.\n"
+                        "⚠️ ربات باید دسترسی «افزودن کاربران» داشته باشد.")
+    else:
+        await ctx.reply("🔴 پذیرش خودکار عضویت غیرفعال شد.\n"
+                        "درخواست‌ها باید توسط مدیر تایید شوند.")
+
+
+@command("بن ماندگار", "بن دائمی خروج", role="admin", permission="manage",
+         category="moderation",
+         description="خروج/بن ماندگار: کاربر اخراج‌شده دیگر نمی‌تواند بازگردد",
+         usage="بن ماندگار")
+async def cmd_sticky_ban(ctx: CommandContext) -> None:
+    if not await require(ctx, role="admin", permission="manage"):
+        return
+    settings_obj = await get_settings(ctx.session, ctx.chat_id)
+    settings_obj.sticky_ban = not bool(settings_obj.sticky_ban)
+    invalidate_settings(ctx.chat_id)
+    if settings_obj.sticky_ban:
+        await ctx.reply("🔒 بن ماندگار فعال شد.\n"
+                        "هر کاربر بن/اخراج‌شده تا زمان «رفع بن» نمی‌تواند با هیچ لینکی "
+                        "دوباره وارد گروه شود.")
+    else:
+        await ctx.reply("🔓 بن ماندگار غیرفعال شد.\n"
+                        "اخراج (کیک) به حالت عادی برگشت و کاربر می‌تواند دوباره جوین شود.")
+
+
+@command("اعلام تغییر نام", "اطلاع تغییر نام", role="admin", permission="manage",
+         category="welcome", description="اعلام خودکار تغییر نام کاربران در گروه",
+         usage="اعلام تغییر نام")
+async def cmd_announce_name(ctx: CommandContext) -> None:
+    if not await require(ctx, role="admin", permission="manage"):
+        return
+    settings_obj = await get_settings(ctx.session, ctx.chat_id)
+    settings_obj.announce_name_change = not bool(settings_obj.announce_name_change)
+    invalidate_settings(ctx.chat_id)
+    await ctx.reply(f"{'🟢' if settings_obj.announce_name_change else '🔴'} "
+                    f"اعلام تغییر نام کاربران "
+                    f"{'فعال' if settings_obj.announce_name_change else 'غیرفعال'} شد.")
+
+
+@command("اعلام تغییر آیدی", "اطلاع تغییر آیدی", "اعلام تغییر یوزرنیم",
+         role="admin", permission="manage", category="welcome",
+         description="اعلام خودکار تغییر آیدی کاربران در گروه",
+         usage="اعلام تغییر آیدی")
+async def cmd_announce_username(ctx: CommandContext) -> None:
+    if not await require(ctx, role="admin", permission="manage"):
+        return
+    settings_obj = await get_settings(ctx.session, ctx.chat_id)
+    settings_obj.announce_username_change = not bool(settings_obj.announce_username_change)
+    invalidate_settings(ctx.chat_id)
+    await ctx.reply(f"{'🟢' if settings_obj.announce_username_change else '🔴'} "
+                    f"اعلام تغییر آیدی کاربران "
+                    f"{'فعال' if settings_obj.announce_username_change else 'غیرفعال'} شد.")

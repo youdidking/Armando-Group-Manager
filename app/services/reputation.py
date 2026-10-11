@@ -108,10 +108,11 @@ async def leaderboard_text(session: AsyncSession, chat_id: int, limit: int = 10)
         return "🏅 جدول اعتبار\n\nهنوز امتیازی ثبت نشده است."
     lines = ["🏅 <b>جدول اعتبار کاربران</b>", ""]
     medals = ["🥇", "🥈", "🥉"]
+    from .chat_state import display_names
+
+    names = await display_names(session, [row[0] for row in rows])
     for index, (user_id, positive, negative, score) in enumerate(rows, start=1):
-        user = await session.get(User, user_id)
-        name = f"{user.first_name or ''} {user.last_name or ''}".strip() if user else str(user_id)
-        name = name or str(user_id)
+        name = names.get(int(user_id)) or str(user_id)
         medal = medals[index - 1] if index <= 3 else f"{to_persian_digits(str(index))}."
         lines.append(f"{medal} {name} — ⭐️ {to_persian_digits(str(score))} "
                      f"(👍 {to_persian_digits(str(positive))} | 👎 {to_persian_digits(str(negative))})")

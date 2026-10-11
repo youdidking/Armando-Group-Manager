@@ -23,6 +23,7 @@ from aiogram.types import (
     ChatMemberMember,
     ChatMemberOwner,
     ChatMemberUpdated,
+    ChatJoinRequest,
     Message,
     MessageReactionUpdated,
     ReactionTypeEmoji,
@@ -1564,3 +1565,120 @@ async def test_mention_messages_are_sent_without_a_parse_mode(dispatcher):
     for call in calls:
         assert call.kwargs.get("parse_mode") is None, call.kwargs
         assert call.kwargs.get("entities")
+
+
+# --------------------------------------------------------------------------- #
+# «بن خروج» must really ban: no silent unban, no way back in
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_kick_leaves_a_permanent_ban(dispatcher):
+    """Regression: a kick used to ban and unban immediately, so the member
+    simply clicked an invite link and walked back in."""
+    bot = build_fake_bot()
+    target = group_message("سلام", user_id=MEMBER_ID)
+    await feed(dispatcher, bot, group_message("اخراج", user_id=OWNER_ID, reply_to=target))
+
+    assert bot.ban_chat_member.await_count == 1
+    assert bot.unban_chat_member.await_count == 0, "a sticky removal must not unban"
+
+
+@pytest.mark.asyncio
+async def test_banned_member_cannot_slip_back_in(dispatcher):
+    """A member with an active ban is removed again the moment they re-enter."""
+    bot = build_fake_bot()
+    target = group_message("سلام", user_id=MEMBER_ID)
+    await feed(dispatcher, bot, group_message("اخراج", user_id=OWNER_ID, reply_to=target))
+    banned_once = bot.ban_chat_member.await_count
+
+    # A real join is a *service* message: it carries no text, otherwise the
+    # command router would swallow it before the member handler ever runs.
+    rejoin = group_message(
+        None, user_id=MEMBER_ID,
+        new_chat_members=[User(id=MEMBER_ID, is_bot=False, first_name="Ali")])
+    await feed(dispatcher, bot, rejoin)
+
+    assert bot.ban_chat_member.await_count > banned_once, "re-entry was not blocked"
+    texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
+    assert any("بن است" in text for text in texts)
+
+
+# --------------------------------------------------------------------------- #
+# Commands vs. ordinary sentences
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_sentences_that_contain_a_command_word_are_ignored(dispatcher):
+    """«بن خروج رو کی حذف کرده» is conversation, not a command."""
+    from app.handlers.registry import registry
+
+    for sentence in ("بنظرم این کار خوبه", "بن خروج رو کی حذف کرده",
+                     "حذف سکوت رو کی زده", "سلام چطوری"):
+        assert registry.match(sentence) is None, sentence
+
+
+@pytest.mark.asyncio
+async def test_commands_accept_a_username_argument(dispatcher):
+    """«تگ @user الاغ» and «حذف سکوت @user» must parse into phrase + args."""
+    from app.handlers.registry import registry
+
+    match = registry.match("تگ @dfgrdrtg الاغ")
+    assert match is not None and match.phrase == "تگ"
+    assert match.args == ["@dfgrdrtg", "الاغ"]
+
+    match = registry.match("حذف سکوت @DFKGHEHG")
+    assert match is not None and match.phrase == "حذف سکوت"
+    assert match.args == ["@dfkghehg"]
+
+
+# --------------------------------------------------------------------------- #
+# Auto reply filters
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_auto_reply_filter_answers(dispatcher):
+    """Regression: the cached RuleView had no ``replies`` field, so every
+    auto-reply trigger crashed with «خطا در انجام عملیات»."""
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("فیلتر سلام = خوش آمدید", user_id=OWNER_ID))
+    bot.send_message.reset_mock()
+
+    await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
+    texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
+    assert "خوش آمدید" in texts
+
+
+# --------------------------------------------------------------------------- #
+# Auto approval of join requests (private groups)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_join_request_is_auto_approved(dispatcher):
+    """A private group sends ``chat_join_request``; with the setting on, the bot
+    approves it without waiting for an admin."""
+    from aiogram.types import Chat as ChatType
+    from aiogram.types import Update
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("پذیرش خودکار", user_id=OWNER_ID))
+
+    request = ChatJoinRequest(
+        chat=ChatType(id=CHAT_ID, type="supergroup", title="گروه تست"),
+        from_user=User(id=7777, is_bot=False, first_name="جدید"),
+        date=1, user_chat_id=7777)
+    await dispatcher.feed_update(
+        bot, Update(update_id=_next_update_id(), chat_join_request=request))
+
+    assert bot.approve_chat_join_request.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_join_request_is_left_alone_when_disabled(dispatcher):
+    from aiogram.types import Chat as ChatType
+    from aiogram.types import Update
+
+    bot = build_fake_bot()
+    request = ChatJoinRequest(
+        chat=ChatType(id=CHAT_ID, type="supergroup", title="گروه تست"),
+        from_user=User(id=7778, is_bot=False, first_name="جدید"),
+        date=1, user_chat_id=7778)
+    await dispatcher.feed_update(
+        bot, Update(update_id=_next_update_id(), chat_join_request=request))
+
+    assert bot.approve_chat_join_request.await_count == 0

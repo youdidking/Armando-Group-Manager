@@ -229,6 +229,7 @@ ARG_RULES: dict[str, tuple[str, str]] = {
     "ارز": ("keys", "market"),
     "قیمت": ("keys", "market"),
     "فیلتر کردن": ("free", ""),
+    "حذف فیلتر": ("free", ""),
     "حالت فیلتر": ("keys", "mode"),
     "اقدام فیلتر": ("keys", "action"),
     "ذخیره": ("free", ""),

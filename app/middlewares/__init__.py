@@ -78,6 +78,20 @@ class ChatTrackingMiddleware(BaseMiddleware):
         message = event if isinstance(event, Message) else getattr(event, "message", None)
         if session is not None and message is not None and getattr(message, "chat", None):
             chat = message.chat
+
+            # Telegram never announces a profile edit, so every update is one
+            # more chance to notice that somebody renamed themselves.
+            actor = getattr(message, "from_user", None)
+            if actor is not None and chat.type in {"group", "supergroup"}:
+                try:
+                    from ..services.identity_watch import watch_identity
+
+                    bot = data.get("bot")
+                    if bot is not None:
+                        await watch_identity(bot, session, chat.id, actor)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("identity watch skipped: %s", exc)
+
             now = time.monotonic()
             last = self._last_touch.get(chat.id, 0.0)
             if now - last > 60:  # at most once a minute per chat

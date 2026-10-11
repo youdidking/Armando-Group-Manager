@@ -35,6 +35,23 @@ MIGRATIONS: dict[int, list[str]] = {
     ],
 }
 
+# SQLite has no "ADD COLUMN IF NOT EXISTS", so this step inspects the table
+# first: a plain statement list would raise (and log a warning) on every
+# single start-up once the columns exist.
+async def _migration_4(engine: AsyncEngine) -> None:
+    """Sticky ban, identity-change notices and auto-approved join requests."""
+    await add_column(engine, "chat_settings", "sticky_ban",
+                     "BOOLEAN NOT NULL DEFAULT 1")
+    await add_column(engine, "chat_settings", "announce_name_change",
+                     "BOOLEAN NOT NULL DEFAULT 1")
+    await add_column(engine, "chat_settings", "announce_username_change",
+                     "BOOLEAN NOT NULL DEFAULT 1")
+    await add_column(engine, "chat_settings", "auto_approve_join_requests",
+                     "BOOLEAN NOT NULL DEFAULT 0")
+
+
+MIGRATIONS[4] = _migration_4
+
 CURRENT_VERSION = max(MIGRATIONS) if MIGRATIONS else 0
 
 
@@ -62,14 +79,21 @@ async def run_migrations(engine: AsyncEngine) -> int:
     version = await _current_version(engine)
     applied = 0
     for target in sorted(v for v in MIGRATIONS if v > version):
-        statements = MIGRATIONS[target]
+        step = MIGRATIONS[target]
         try:
-            async with engine.begin() as conn:
-                for statement in statements:
-                    await conn.execute(text(statement))
-                await conn.execute(
-                    text("UPDATE schema_version SET version = :v WHERE id = 1"), {"v": target}
-                )
+            if callable(step):
+                await step(engine)
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text("UPDATE schema_version SET version = :v WHERE id = 1"),
+                        {"v": target})
+            else:
+                async with engine.begin() as conn:
+                    for statement in step:
+                        await conn.execute(text(statement))
+                    await conn.execute(
+                        text("UPDATE schema_version SET version = :v WHERE id = 1"),
+                        {"v": target})
             applied += 1
             logger.info("migration %s applied", target)
         except Exception as exc:  # noqa: BLE001 - never fail startup on a duplicate step

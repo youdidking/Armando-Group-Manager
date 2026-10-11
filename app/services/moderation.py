@@ -225,10 +225,22 @@ async def unban_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Ac
 async def kick_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Actor,
                     target_id: int, target_name: str = "", reason: str = "",
                     delete_message_id: int | None = None, chat_title: str = "",
-                    source: str = "command") -> str:
-    """Ban + immediate unban (a kick keeps the user out but allows re-joining)."""
+                    source: str = "command", sticky: bool = True) -> str:
+    """Remove a member from the chat.
+
+    ``sticky=True`` (the default, driven by the ``sticky_ban`` setting) keeps
+    the ban in place, so the member can **never** come back through an invite
+    link until an admin unbans them.  ``sticky=False`` performs the classic
+    kick - ban followed by an immediate unban - which lets the member re-join.
+    """
     ok = await safe_ban(bot, chat_id, target_id, context="kick")
-    await safe_unban(bot, chat_id, target_id, only_if_banned=False, context="kick_unban")
+    if sticky:
+        # The ban stays: Telegram then blocks every re-entry attempt.
+        session.add(BanRecord(chat_id=chat_id, user_id=target_id, banned_by=actor.user_id,
+                              reason=(reason or "")[:500], scope="chat", active=True,
+                              until=None, created_at=datetime.utcnow()))
+    else:
+        await safe_unban(bot, chat_id, target_id, only_if_banned=False, context="kick_unban")
     await record_action(session, chat_id=chat_id, action="kick", target_id=target_id,
                         actor_id=actor.user_id, reason=reason, source=source)
     state = await get_member_state(session, chat_id, target_id)
@@ -245,8 +257,36 @@ async def kick_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Act
     )
     if not ok:
         return "⚠️ عملیات در تلگرام انجام نشد (احتمالاً دسترسی ربات ناکافی است)."
-    return (f"👢 کاربر {mention(target_id, target_name or await _display_name(session, target_id))} "
-            f"از گروه اخراج شد.")
+    who = mention(target_id, target_name or await _display_name(session, target_id))
+    if sticky:
+        return (f"👢 کاربر {who} از گروه اخراج شد و بن ماندگار شد.\n"
+                f"🔒 تا زمان رفع بن توسط مدیر، امکان بازگشت با هیچ لینکی ندارد.")
+    return (f"👢 کاربر {who} از گروه اخراج شد.")
+
+
+async def enforce_sticky_ban(bot: Bot, session: AsyncSession, chat_id: int,
+                             user_id: int) -> bool:
+    """Re-ban a member who is still banned but somehow got back in.
+
+    Telegram normally blocks a banned user from re-entering a supergroup, but
+    basic groups, admin re-adds and invite-link edge cases can slip through.
+    Returns True when the member was removed again.
+    """
+    from sqlalchemy import select as _select
+
+    record = (await session.execute(
+        _select(BanRecord).where(BanRecord.chat_id == chat_id,
+                                 BanRecord.user_id == user_id,
+                                 BanRecord.active.is_(True)))).scalars().first()
+    if record is None:
+        return False
+    if record.until is not None and record.until <= datetime.utcnow():
+        record.active = False
+        return False
+    removed = await safe_ban(bot, chat_id, user_id, context="sticky_reban")
+    if removed:
+        logger.info("sticky ban re-applied user=%s chat=%s", user_id, chat_id)
+    return bool(removed)
 
 
 async def mute_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Actor,

@@ -194,6 +194,25 @@ async def get_settings_cached(session: AsyncSession, chat_id: int) -> dict[str, 
     return data
 
 
+async def display_names(session: AsyncSession, user_ids) -> dict[int, str]:
+    """Resolve many user ids to display names with **one** query.
+
+    Leaderboards used to call ``session.get(User, id)`` once per row, which is
+    a classic N+1 - fine for three rows, wasteful for thirty.
+    """
+    ids = [int(uid) for uid in (user_ids or []) if uid]
+    if not ids:
+        return {}
+    from ..db.models import User
+
+    rows = (await session.execute(select(User).where(User.id.in_(ids)))).scalars().all()
+    names: dict[int, str] = {}
+    for user in rows:
+        name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        names[int(user.id)] = name or (f"@{user.username}" if user.username else str(user.id))
+    return names
+
+
 async def update_settings(session: AsyncSession, chat_id: int, **values) -> ChatSettings:
     obj = await get_settings(session, chat_id)
     for key, value in values.items():

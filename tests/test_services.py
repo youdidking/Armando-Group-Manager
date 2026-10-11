@@ -389,3 +389,72 @@ async def test_raw_api_call_keeps_false_values():
     assert _payload(bot.calls, "promoteChatMember") == {"chat_id": "-1001",
                                                         "user_id": "55",
                                                         "can_manage_chat": "false"}
+
+
+# --------------------------------------------------------------------------- #
+# Identity change notices
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_identity_change_is_announced(session):
+    """Telegram sends no profile-change update, so the bot diffs every message
+    against the stored row and announces «از حسن با آیدی @hassan به محمد ...»."""
+    from unittest.mock import AsyncMock
+
+    from aiogram.types import User as TgUser
+
+    from app.db.models import User
+    from app.services import identity_watch
+
+    identity_watch._recent.clear()
+    session.add(User(id=555, first_name="حسن", username="hassan73273"))
+    await session.flush()
+
+    bot = AsyncMock()
+    bot.send_message = AsyncMock(return_value=True)
+    await identity_watch.watch_identity(
+        bot, session, CHAT_ID,
+        TgUser(id=555, is_bot=False, first_name="محمد", username="muhammad346456"))
+
+    assert bot.send_message.await_count == 1
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "حسن" in text and "محمد" in text
+    assert "@hassan73273" in text and "@muhammad346456" in text
+
+    row = await session.get(User, 555)
+    assert row.first_name == "محمد"
+    assert row.username == "muhammad346456"
+
+
+@pytest.mark.asyncio
+async def test_identity_watch_stays_silent_when_nothing_changed(session):
+    from unittest.mock import AsyncMock
+
+    from aiogram.types import User as TgUser
+
+    from app.db.models import User
+    from app.services import identity_watch
+
+    identity_watch._recent.clear()
+    session.add(User(id=556, first_name="علی", username="ali"))
+    await session.flush()
+
+    bot = AsyncMock()
+    bot.send_message = AsyncMock(return_value=True)
+    await identity_watch.watch_identity(
+        bot, session, CHAT_ID, TgUser(id=556, is_bot=False, first_name="علی", username="ali"))
+    assert bot.send_message.await_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# Auto reply payload
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_rule_view_exposes_the_custom_response_fields(session):
+    """Regression: the cached view lacked ``replies`` / ``response_*`` so the
+    renderer raised ``AttributeError`` on every auto-reply trigger."""
+    await filter_service.add_rule(session, CHAT_ID, "سلام", is_blocklist=False,
+                                  match_mode="contains", response_text="علیک سلام")
+    rule = (await filter_service.get_rules(session, CHAT_ID))[0]
+    for field in ("replies", "response_file_id", "response_caption", "response_buttons"):
+        assert hasattr(rule, field), field
+    assert rule.response_text == "علیک سلام"
