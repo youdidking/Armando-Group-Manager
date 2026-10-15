@@ -121,11 +121,14 @@ class CommandRegistry:
 # Words that only ever appear inside ordinary sentences (never in an argument).
 SENTENCE_MARKERS = frozenset({
     "شده", "شدم", "شد", "است", "نیست", "بود", "بودم", "هست", "هستم", "چنده", "چند",
-    "چقدر", "چطور", "چرا", "چی", "چیست", "کی", "کجا", "کدوم", "گرون", "ارزون",
-    "میشه", "میشود", "میخوام", "میخواهم", "میخواد", "باید", "دارم", "داره", "داریم",
+    "چقدر", "چطور", "چرا", "چی", "چیه", "چیست", "کی", "کیه", "کجا", "کجاست", "کدوم",
+    "گرون", "ارزون", "مال", "رو", "را", "برای",
+    "میشه", "میشود", "نمیشه", "میخوام", "میخواهم", "میخواد", "میخوای", "میتونی",
+    "میتونید", "باید", "دارم", "داره", "داریم",
     "الان", "امروز", "فردا", "دیروز", "دیگه", "لطفا", "خواهش", "ممنون",
-    "خوبه", "بد", "لازمه", "کنید", "کردم", "کرد", "میکنم", "میکنه", "بنظرم", "بنظر",
-    "فکر", "یعنی", "واقعا", "اصلا", "همیشه", "هیچی", "چیزی", "کردن", "شدن",
+    "خوبه", "بد", "لازمه", "کن", "بکن", "بده", "بگو", "بگید", "بفرست", "بیار", "برام",
+    "کنید", "کردم", "کرد", "کرده", "کردی", "کردین", "میکنم", "میکنه", "میکنی", "بنظرم", "بنظر",
+    "فکر", "یعنی", "واقعا", "اصلا", "همیشه", "هیچی", "چیزی", "این", "اون", "کردن", "شدن",
     "خواهم", "باشه", "باشید", "نیستم", "نبود", "موند", "میمونه", "گرفت",
 })
 
@@ -189,6 +192,8 @@ def _vocab_validator(vocab: str, token: str) -> bool:
 
 _TARGET_USERNAME_RE = re.compile(r"^@?(?=[A-Za-z0-9_]*[A-Za-z_])[A-Za-z0-9_]{4,32}$")
 _TARGET_ID_RE = re.compile(r"^\d{5,15}$")
+# Chat ids may be negative for groups/channels: -1001234567890
+_CHAT_ID_RE = re.compile(r"^-?\d{5,15}$")
 
 
 def args_are_valid(command: Command, args: list[str]) -> bool:
@@ -205,6 +210,13 @@ def args_are_valid(command: Command, args: list[str]) -> bool:
                 normalize_digits(first, to="ascii")):
             return len(args) <= 3
         return len(args) <= 2 and not any(token in SENTENCE_MARKERS for token in args)
+    if kind == "chatref":
+        # Strictly one token that is a username or a chat id - so ordinary
+        # talk like «آیدی گروه چنده» is never treated as a command.
+        if len(args) != 1:
+            return False
+        token = normalize_digits(args[0], to="ascii")
+        return bool(_TARGET_USERNAME_RE.match(token) or _CHAT_ID_RE.match(token))
     if kind == "numeric":
         return len(args) <= 3 and all(_has_digit(token) for token in args)
     if kind == "keys":
@@ -225,6 +237,7 @@ def args_are_valid(command: Command, args: list[str]) -> bool:
 
 # Rules for the commands that take arguments (keyed by the first phrase).
 ARG_RULES: dict[str, tuple[str, str]] = {
+    "آیدی گروه": ("chatref", ""),
     "عدد تصادفی": ("numeric", ""),
     "ارز": ("keys", "market"),
     "قیمت": ("keys", "market"),

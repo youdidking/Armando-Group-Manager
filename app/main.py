@@ -21,7 +21,8 @@ from .config import load_settings, settings
 from .db.base import dispose_engine, init_db
 from .handlers import build_routers
 from .logging_setup import setup_logging
-from .middlewares import ChatTrackingMiddleware, DbSessionMiddleware, ThrottlingMiddleware
+from .middlewares import (ChatTrackingMiddleware, DbSessionMiddleware,
+                         GroupApprovalMiddleware, ThrottlingMiddleware)
 from .services.market import close_http_session
 from .services.scheduler import start_scheduler, stop_scheduler
 
@@ -39,7 +40,10 @@ BANNER = r"""
 
 def build_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher(name="armando")
-    # Database session must be available to every handler.
+    # The approval gate runs before the per-update database middleware. It
+    # creates a short-lived session for its check and lets membership updates
+    # reach their handlers so bot removals are recorded correctly.
+    dispatcher.update.outer_middleware(GroupApprovalMiddleware())
     dispatcher.update.outer_middleware(DbSessionMiddleware())
     dispatcher.update.outer_middleware(ThrottlingMiddleware())
     dispatcher.message.middleware(ChatTrackingMiddleware())

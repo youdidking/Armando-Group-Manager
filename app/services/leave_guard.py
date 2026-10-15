@@ -20,7 +20,7 @@ from datetime import datetime
 
 from aiogram import Bot
 
-from ..core.errors import safe_call
+from ..core.errors import safe_ban
 from ..core.normalization import to_persian_digits
 from .permissions import bot_has_right, fetch_chat_member
 
@@ -45,16 +45,24 @@ def status_text(settings: dict) -> str:
 
 
 async def check_leave(bot: Bot, chat_id: int, user_id: int, settings: dict,
-                      joined_at: datetime | None = None) -> str | None:
-    """Ban the member if a leave rule fires; return the Persian reason or None."""
+                      joined_at: datetime | None = None,
+                      session=None, member_status: str | None = None) -> str | None:
+    """Ban the member if a leave rule fires; return the Persian reason or None.
+
+    ``session`` lets the guard write a ``ban_records`` row.  Without it the bot
+    would ban the member on Telegram's side while having no idea they are
+    banned - so the sticky-ban re-entry check could never fire for them.
+    """
     if not is_enabled(settings):
         return None
     if not await bot_has_right(bot, chat_id, "can_restrict_members"):
         logger.debug("leave guard skipped: bot may not restrict members in %s", chat_id)
         return None
 
-    member = await fetch_chat_member(bot, chat_id, user_id, refresh=True)
-    status = getattr(member, "status", "")
+    status = member_status
+    if status is None:
+        member = await fetch_chat_member(bot, chat_id, user_id, refresh=True)
+        status = getattr(member, "status", "")
     if status in {"administrator", "creator", "kicked"}:
         return None  # never touch admins, and a banned user is already gone
 
@@ -74,9 +82,25 @@ async def check_leave(bot: Bot, chat_id: int, user_id: int, settings: dict,
     if reason is None:
         return None
 
-    banned = await safe_call(lambda: bot.ban_chat_member(chat_id=chat_id, user_id=user_id),
-                             default=None, context="leave_guard_ban", log=True)
-    if banned is None:
+    # Explicit zero means a permanent Telegram ban. In supergroups this blocks
+    # the same account from rejoining through invite links until an admin
+    # explicitly unbans it.
+    banned = await safe_ban(bot, chat_id, user_id, until_date=0,
+                            context="leave_guard_ban")
+    if not banned:
         return None
-    logger.info("leave guard banned user=%s in chat=%s (%s)", user_id, chat_id, reason)
+
+    if session is not None:
+        try:
+            from ..db.models import BanRecord
+
+            session.add(BanRecord(
+                chat_id=chat_id, user_id=user_id, banned_by=None,
+                reason=(reason or "")[:500], scope="chat", active=True,
+                until=None, created_at=datetime.utcnow()))
+            await session.flush()
+        except Exception as exc:  # noqa: BLE001 - never lose the ban itself
+            logger.warning("could not record the leave-guard ban: %s", exc)
+
+    logger.info("کاربر %s در گروه %s به‌دلیل خروج بن شد (%s)", user_id, chat_id, reason)
     return reason

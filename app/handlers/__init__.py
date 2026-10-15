@@ -19,6 +19,7 @@ def build_routers() -> list[Router]:
     5. ``errors``   - last resort error handler
     """
     from . import (  # noqa: F401 - import order registers commands
+        approval,
         commands,
         entertainment_market,
         errors,
@@ -41,6 +42,7 @@ def build_routers() -> list[Router]:
 
     return [
         commands.router,
+        approval.router,
         panel.router,
         members.router,
         messages.router,

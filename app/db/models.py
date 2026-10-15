@@ -63,6 +63,8 @@ class Chat(Base, TimestampMixin):
     member_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
     bot_is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
+    # Only read when REQUIRE_GROUP_APPROVAL=true: an unapproved group is ignored.
+    is_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 

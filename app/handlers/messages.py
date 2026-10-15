@@ -167,7 +167,16 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
                 file_name = message.video.file_name
             porn_matches = detect_porn(text, file_name=file_name,
                                        strictness=int(settings.get("anti_porn_strictness", 2)))
-            if porn_matches:
+            visual_match = False
+            if not porn_matches and any((message.photo, message.video, message.animation,
+                                         message.video_note, message.document)):
+                try:
+                    from ..services.media_safety import detect_visual_nudity
+
+                    visual_match = await detect_visual_nudity(bot, message)
+                except Exception as exc:  # noqa: BLE001 - optional vision must never crash moderation
+                    logger.warning("بررسی تصویری ضدپورن ناموفق بود: %s", exc.__class__.__name__)
+            if porn_matches or visual_match:
                 violation = lock_service.Violation(
                     key="porn", label="محتوای مستهجن", emoji="🔞",
                     action=settings.get("anti_porn_action", "delete_ban"),

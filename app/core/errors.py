@@ -194,6 +194,35 @@ async def safe_unban(bot, chat_id: int, user_id: int, only_if_banned: bool = Tru
     return bool(result)
 
 
+async def safe_ban_sender_chat(bot, chat_id: int, sender_chat_id: int,
+                               context: str = "ban_sender_chat") -> bool:
+    """Block a **channel** from posting in a supergroup.
+
+    Useful when a spammer posts as one of their channels instead of their own
+    account: banning the account leaves the channel inside the group.
+
+    Caveats worth knowing (Bot API):
+      * supergroups and channels only - basic groups raise an error,
+      * it blocks the owner from posting as **any** of their channels,
+      * the group's own linked channel cannot be banned.
+    """
+    if chat_id == sender_chat_id:        # a chat cannot ban itself
+        return False
+    result = await safe_call(
+        lambda: bot.ban_chat_sender_chat(chat_id=chat_id, sender_chat_id=sender_chat_id),
+        default=False, context=context, retries=0, log=False)
+    return bool(result)
+
+
+async def safe_unban_sender_chat(bot, chat_id: int, sender_chat_id: int,
+                                 context: str = "unban_sender_chat") -> bool:
+    """Lift a channel block again (see :func:`safe_ban_sender_chat`)."""
+    result = await safe_call(
+        lambda: bot.unban_chat_sender_chat(chat_id=chat_id, sender_chat_id=sender_chat_id),
+        default=False, context=context, retries=0, log=False)
+    return bool(result)
+
+
 async def notify_error_chat(bot, text: str) -> None:
     """Send critical errors to the configured error log chat (never raises)."""
     target = settings.error_log_chat_id or settings.log_chat_id

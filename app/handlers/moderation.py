@@ -47,15 +47,44 @@ def _warn_card_buttons(chat_id: int, user_id: int) -> list[list]:
     ]
 
 
+async def _block_sender_chat(ctx, what: str) -> bool:
+    """Block the channel a replied-to message was posted as.
+
+    Banning the account is not enough when somebody writes *as a channel*:
+    the channel identity stays in the group unless it is banned separately.
+    """
+    reply = ctx.message.reply_to_message
+    sender = getattr(reply, "sender_chat", None) if reply is not None else None
+    if sender is None or sender.id == ctx.chat_id:
+        return False  # a group can never ban its own linked channel
+    from ..core.errors import safe_ban_sender_chat
+
+    ok = await safe_ban_sender_chat(ctx.bot, ctx.chat_id, sender.id)
+    if not ok:
+        return False
+    await ctx.reply(
+        f"📢 کانال «{sender.title or sender.id}» هم مسدود شد.\n"
+        f"⚠️ توجه: این مسدودسازی مانع ارسالِ مالک کانال با «هر یک از» "
+        f"کانال‌هایش می‌شود؛ برای آزادسازی از <code>رفع بن کانال</code> استفاده کنید.\n"
+        f"📌 درخواست: {what}", reply_to=False)
+    return True
+
+
 @command("بن", "بن کردن", "مسدود", role="moderator", permission="ban",
          category="moderation", description="بن کردن کاربر", usage="بن [مدت] [دلیل]")
 async def cmd_ban(ctx: CommandContext) -> None:
     if not await require(ctx, role="moderator", permission="ban"):
         return
+    if not await ensure_bot_admin(ctx, permission="ban"):
+        return
+    # A message posted *as a channel* has no user account to moderate, so the
+    # channel itself must be blocked (this runs before target resolution,
+    # which explicitly rejects channel messages).
+    if await _block_sender_chat(ctx, "بن"):
+        await ctx.delete_invocation()
+        return
     target, duration, reason = await _target(ctx)
     if target is None or not await guard_target(ctx, target):
-        return
-    if not await ensure_bot_admin(ctx, permission="ban"):
         return
     reply_id = ctx.message.reply_to_message.message_id if ctx.message.reply_to_message else None
     text = await mod.ban_user(ctx.bot, ctx.session, chat_id=ctx.chat_id, actor=ctx.actor,
@@ -102,10 +131,13 @@ async def cmd_unban(ctx: CommandContext) -> None:
 async def cmd_kick(ctx: CommandContext) -> None:
     if not await require(ctx, role="moderator", permission="kick"):
         return
+    if not await ensure_bot_admin(ctx, permission="ban"):
+        return
+    if await _block_sender_chat(ctx, "اخراج"):
+        await ctx.delete_invocation()
+        return
     target, _, reason = await _target(ctx)
     if target is None or not await guard_target(ctx, target):
-        return
-    if not await ensure_bot_admin(ctx, permission="ban"):
         return
     reply_id = ctx.message.reply_to_message.message_id if ctx.message.reply_to_message else None
     sticky = bool(ctx.settings.get("sticky_ban", True))
@@ -383,3 +415,57 @@ async def cmd_user_info(ctx: CommandContext) -> None:
     if user and user.afk:
         lines.append(f"💤 AFK: {user.afk_reason or 'بله'}")
     await ctx.reply("\n".join(lines))
+
+
+# --------------------------------------------------------------------------- #
+# Channel (sender chat) blocking
+# --------------------------------------------------------------------------- #
+@command("بن کانال", "مسدود کردن کانال", "بلاک کانال", role="moderator", permission="ban",
+         category="moderation", description="مسدود کردن کانالی که با آن پیام داده شده",
+         usage="بن کانال (با ریپلای روی پیام کانال)")
+async def cmd_ban_channel(ctx: CommandContext) -> None:
+    if not await require(ctx, role="moderator", permission="ban"):
+        return
+    if not await ensure_bot_admin(ctx, permission="ban"):
+        return
+    reply = ctx.message.reply_to_message
+    sender = getattr(reply, "sender_chat", None) if reply is not None else None
+    if sender is None:
+        await ctx.reply("⚠️ روی پیامی که «با نام کانال» فرستاده شده ریپلای کنید.")
+        return
+    if sender.id == ctx.chat_id:
+        await ctx.reply("⚠️ کانالِ متصل به خودِ این گروه را نمی‌توان مسدود کرد.")
+        return
+    from ..core.errors import safe_ban_sender_chat
+
+    ok = await safe_ban_sender_chat(ctx.bot, ctx.chat_id, sender.id)
+    if not ok:
+        await ctx.reply("⚠️ مسدود کردن کانال انجام نشد.\n"
+                        "این قابلیت فقط در **سوپرگروه** کار می‌کند و ربات باید "
+                        "دسترسی «محدود کردن اعضا» داشته باشد.")
+        return
+    await ctx.reply(f"📢 کانال «{sender.title or sender.id}» مسدود شد.\n"
+                    f"از این پس مالک آن با هیچ‌یک از کانال‌هایش نمی‌تواند "
+                    f"در این گروه پیام بفرستد.")
+    await ctx.delete_invocation()
+
+
+@command("رفع بن کانال", "آزاد کردن کانال", "آنبلاک کانال", role="moderator",
+         permission="ban", category="moderation",
+         description="آزاد کردن کانال مسدود شده", usage="رفع بن کانال (با ریپلای)")
+async def cmd_unban_channel(ctx: CommandContext) -> None:
+    if not await require(ctx, role="moderator", permission="ban"):
+        return
+    reply = ctx.message.reply_to_message
+    sender = getattr(reply, "sender_chat", None) if reply is not None else None
+    if sender is None:
+        await ctx.reply("⚠️ روی پیامی که «با نام کانال» فرستاده شده ریپلای کنید.")
+        return
+    from ..core.errors import safe_unban_sender_chat
+
+    ok = await safe_unban_sender_chat(ctx.bot, ctx.chat_id, sender.id)
+    if not ok:
+        await ctx.reply("⚠️ آزادسازی انجام نشد (کانال از قبل مسدود نبوده یا دسترسی کم است).")
+        return
+    await ctx.reply(f"📢 کانال «{sender.title or sender.id}» آزاد شد.")
+    await ctx.delete_invocation()

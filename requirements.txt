@@ -15,12 +15,13 @@ asyncpg==0.30.0
 # HTTP: webhook server + market/price providers
 aiohttp==3.11.10
 
+# Offline visual moderation: NudeNet (ONNX CPU) + animated image decoding
+nudenet==3.4.2
+Pillow==11.3.0
+
 # Persian calendar (jalali dates)
 jdatetime==5.0.0
 
 # .env support
 python-dotenv==1.0.1
 
-# ------------------------------------------------------------------ testing
-pytest==8.3.4
-pytest-asyncio==0.25.0

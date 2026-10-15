@@ -910,11 +910,87 @@ async def cmd_panel(ctx: CommandContext) -> None:
     await ctx.delete_invocation()
 
 
-@command("آیدی گروه", "شناسه گروه", "ایدی گروه", role="member", category="general",
-         description="نمایش شناسه گروه")
+_CHAT_TYPE_FA = {
+    "private": "چت خصوصی",
+    "group": "گروه معمولی",
+    "supergroup": "سوپرگروه",
+    "channel": "کانال",
+}
+
+
+async def _describe_chat(ctx: CommandContext, chat_id: int | str) -> bool:
+    """Print a full description of ``chat_id``.  False when Telegram refuses."""
+    from ..core.normalization import normalize_digits
+
+    try:
+        chat = await ctx.bot.get_chat(chat_id)
+    except Exception:  # noqa: BLE001 - Telegram rejects chats we cannot see
+        return False
+
+    kind = _CHAT_TYPE_FA.get(chat.type, chat.type or "—")
+    title = (chat.title or chat.full_name or chat.first_name or "—").strip()
+
+    lines_out = [
+        "💬 <b>اطلاعات چت</b>",
+        "",
+        f"📌 نوع: <b>{kind}</b>",
+        f"📝 عنوان: {title}",
+        f"🔢 شناسه: <code>{chat.id}</code>",
+    ]
+
+    if chat.username:
+        lines_out.append("🌐 دسترسی: <b>عمومی</b>")
+        lines_out.append(f"🏷 نام کاربری: @{chat.username}")
+    else:
+        lines_out.append("🌐 دسترسی: <b>خصوصی</b> (نام کاربری ندارد)")
+
+    if chat.type in {"group", "supergroup", "channel"}:
+        try:
+            count = await ctx.bot.get_chat_member_count(chat.id)
+            label = "👥 تعداد دنبال‌کنندگان" if chat.type == "channel" else "👥 تعداد اعضا"
+            lines_out.append(f"{label}: {normalize_digits(str(count))}")
+        except Exception:  # noqa: BLE001 - member count needs membership
+            lines_out.append("👥 تعداد اعضا: در دسترس نیست (ربات عضو این چت نیست)")
+
+    if chat.description:
+        desc = chat.description.strip()
+        if len(desc) > 200:
+            desc = desc[:200] + "…"
+        lines_out.append(f"📋 توضیحات: {desc}")
+
+    await ctx.reply("\n".join(lines_out))
+    return True
+
+
+@command("آیدی گروه", "شناسه گروه", "ایدی گروه", "اطلاعات گروه", "اطلاعات کانال",
+         role="member", category="general",
+         description="نمایش شناسه و اطلاعات گروه یا کانال",
+         usage="آیدی گروه [نام کاربری یا شناسه]")
 async def cmd_chat_id(ctx: CommandContext) -> None:
-    await ctx.reply(f"💬 شناسه این چت: <code>{ctx.chat_id}</code>\n"
-                    f"🔢 شناسه شما: <code>{ctx.user_id}</code>")
+    """Chat information - for the current chat or any public one by username.
+
+    Telegram only answers ``getChat`` for chats the bot belongs to, or for
+    public chats addressed by username; private chats we are not in stay
+    invisible, which is exactly what the fallback message says.
+    """
+    from ..core.normalization import normalize_digits
+
+    ref = (ctx.arg_text or "").strip()
+    if ref:
+        token = normalize_digits(ref, to="ascii").lstrip("@")
+        target: int | str = int(token) if token.lstrip("-").isdigit() else f"@{token}"
+        if not await _describe_chat(ctx, target):
+            await ctx.reply(
+                "⚠️ اطلاعات این چت در دسترس نیست.\n\n"
+                "علت‌های معمول:\n"
+                "• ربات عضو آن نیست و چت خصوصی است؛\n"
+                "• نام کاربری اشتباه یا حذف شده است.\n\n"
+                "فقط چت‌های عمومی (دارای نام کاربری) را می‌توان "
+                "بدون عضویت بررسی کرد.")
+        return
+
+    if not await _describe_chat(ctx, ctx.chat_id):
+        await ctx.reply(f"💬 شناسه گروه: <code>{ctx.chat_id}</code>")
 
 
 # --------------------------------------------------------------------------- #

@@ -52,6 +52,14 @@ async def _migration_4(engine: AsyncEngine) -> None:
 
 MIGRATIONS[4] = _migration_4
 
+
+async def _migration_5(engine: AsyncEngine) -> None:
+    """Group approval flag (opt-in gate for private deployments)."""
+    await add_column(engine, "chats", "is_approved", "BOOLEAN NOT NULL DEFAULT 0")
+
+
+MIGRATIONS[5] = _migration_5
+
 CURRENT_VERSION = max(MIGRATIONS) if MIGRATIONS else 0
 
 

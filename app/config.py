@@ -103,6 +103,9 @@ class Settings:
 
     # --------------------------------------------------------------- moderation
     global_ban_enabled: bool = False  # owner-only, OFF by default (see spec §35)
+    # Opt-in gate: only groups the bot owner approved may use the bot.
+    # OFF by default because Armando is a *public* multi-tenant bot.
+    require_group_approval: bool = False
     # Public bots: the bot owner is an ordinary user in other people's groups.
     protect_bot_owner: bool = False
     owner_founder_in_groups: bool = False
@@ -172,6 +175,7 @@ class Settings:
             creator_username=(values.get("creator_username") or "RVIVL").strip(),
             creator_url=(values.get("creator_url") or "https://t.me/rvivl").strip(),
             global_ban_enabled=_as_bool(values.get("global_ban_enabled")),
+            require_group_approval=_as_bool(values.get("require_group_approval")),
             protect_bot_owner=_as_bool(values.get("protect_bot_owner")),
             owner_founder_in_groups=_as_bool(values.get("owner_founder_in_groups")),
             default_warn_limit=_as_int(values.get("default_warn_limit")) or 4,
