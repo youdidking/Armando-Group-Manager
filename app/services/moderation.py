@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from html import escape
 from typing import Any
 
 from aiogram import Bot
 from aiogram.types import ChatPermissions
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.duration import format_duration
 from ..core.errors import safe_ban, safe_delete, safe_restrict, safe_unban
+from ..core.normalization import to_persian_digits
 from ..core.timeutils import persian_datetime
 from ..db.models import (
     BanRecord,
@@ -27,7 +29,7 @@ from ..db.models import (
 from ..db.models import ChatMemberState
 from .audit import audit_and_log, html_user
 from .chat_state import get_member_state, get_settings, invalidate_member
-from .permissions import Actor
+from .permissions import Actor, build_actor, check_moderation_target
 
 logger = logging.getLogger("armando.moderation")
 
@@ -66,16 +68,34 @@ UNMUTE_PERMISSIONS = ChatPermissions(
 )
 
 ACTION_LABELS_FA = {
-    "ban": "بن",
-    "temp_ban": "بن موقت",
-    "unban": "رفع بن",
-    "kick": "اخراج",
-    "mute": "سکوت",
-    "temp_mute": "سکوت موقت",
-    "unmute": "لغو سکوت",
-    "warn": "اخطار",
-    "delete": "حذف پیام",
+    "ban": "🔨 بن",
+    "temp_ban": "⏳ بن موقت",
+    "unban": "🕊 رفع بن",
+    "kick": "👢 اخراج",
+    "mute": "🔇 سکوت",
+    "temp_mute": "⏳ سکوت موقت",
+    "unmute": "🔊 لغو سکوت",
+    "warn": "⚠️ اخطار",
+    "unwarn": "🗑 کسر اخطار",
+    "reset_warn": "♻️ صفر کردن اخطارها",
+    "delete": "🗑 حذف پیام",
     "none": "بدون اقدام",
+}
+
+HISTORY_SOURCE_LABELS_FA = {
+    "auto": "خودکار",
+    "command": "دستور",
+    "panel": "پنل",
+    "lock": "قفل",
+    "filter": "فیلتر",
+    "antiflood": "ضدسیل",
+    "antispam": "ضداسپم",
+    "ai": "هوش مصنوعی",
+    "nightmode": "حالت شب",
+    "captcha": "کپچا",
+    "warn_threshold": "سقف اخطار",
+    "federation": "فدراسیون",
+    "warning": "سیستم اخطار",
 }
 
 PUNISHMENT_OPTIONS_FA = {
@@ -152,6 +172,27 @@ async def close_active_actions(session: AsyncSession, chat_id: int, target_id: i
     return int(result.rowcount or 0)
 
 
+async def _manual_action_error(bot: Bot, session: AsyncSession, *, chat_id: int,
+                               actor: Actor, target_id: int,
+                               protected_actor_ids: list[int | None] | None = None,
+                               allow_absent: bool = False) -> str:
+    """Fail closed for self-targeting, admin targets, and owner-issued actions."""
+    reason = await check_moderation_target(
+        bot, session, chat_id, target_id, actor, allow_absent=allow_absent)
+    if reason:
+        return reason
+    if actor.is_group_creator:
+        return ""
+
+    for issuer_id in set(protected_actor_ids or []):
+        if not issuer_id or issuer_id in {actor.user_id, bot.id}:
+            continue
+        issuer = await build_actor(bot, chat_id, issuer_id, session=session)
+        if issuer.is_group_creator:
+            return "⛔️ این اقدام را مالک گروه انجام داده است؛ فقط مالک گروه می‌تواند آن را لغو کند."
+    return ""
+
+
 # --------------------------------------------------------------------------- #
 # Actions
 # --------------------------------------------------------------------------- #
@@ -159,6 +200,11 @@ async def ban_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Acto
                   target_id: int, target_name: str = "", duration: int | None = None,
                   reason: str = "", delete_message_id: int | None = None,
                   chat_title: str = "", source: str = "command") -> str:
+    if source in {"command", "panel"}:
+        denied = await _manual_action_error(bot, session, chat_id=chat_id,
+                                            actor=actor, target_id=target_id)
+        if denied:
+            return denied
     until = datetime.utcnow() + timedelta(seconds=duration) if duration else None
     ok = await safe_ban(bot, chat_id, target_id, until_date=until, context="ban")
 
@@ -196,9 +242,35 @@ async def ban_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Acto
 async def unban_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Actor,
                      target_id: int, target_name: str = "", chat_title: str = "",
                      reason: str = "", source: str = "command") -> str:
+    action_rows = (await session.execute(
+        select(ModerationAction).where(
+            ModerationAction.chat_id == chat_id,
+            ModerationAction.target_id == target_id,
+            ModerationAction.action.in_(("ban", "temp_ban", "kick")),
+            ModerationAction.active.is_(True),
+        )
+    )).scalars().all()
+    now = datetime.utcnow()
+    protected_ids = [item.actor_id for item in action_rows
+                     if item.expires_at is None or item.expires_at > now]
+    ban_rows = (await session.execute(
+        select(BanRecord).where(
+            BanRecord.chat_id == chat_id, BanRecord.user_id == target_id,
+            BanRecord.scope == "chat", BanRecord.active.is_(True),
+        )
+    )).scalars().all()
+    protected_ids.extend(record.banned_by for record in ban_rows
+                         if record.until is None or record.until > now)
+    denied = await _manual_action_error(
+        bot, session, chat_id=chat_id, actor=actor, target_id=target_id,
+        protected_actor_ids=protected_ids, allow_absent=True)
+    if denied:
+        return denied
+
     ok = await safe_unban(bot, chat_id, target_id, only_if_banned=True, context="unban")
     await close_active_actions(session, chat_id, target_id, "ban", undone_by=actor.user_id)
     await close_active_actions(session, chat_id, target_id, "temp_ban", undone_by=actor.user_id)
+    await close_active_actions(session, chat_id, target_id, "kick", undone_by=actor.user_id)
     await record_action(session, chat_id=chat_id, action="unban", target_id=target_id,
                         actor_id=actor.user_id, reason=reason, source=source)
     state = await get_member_state(session, chat_id, target_id)
@@ -233,6 +305,11 @@ async def kick_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Act
     link until an admin unbans them.  ``sticky=False`` performs the classic
     kick - ban followed by an immediate unban - which lets the member re-join.
     """
+    if source in {"command", "panel"}:
+        denied = await _manual_action_error(bot, session, chat_id=chat_id,
+                                            actor=actor, target_id=target_id)
+        if denied:
+            return denied
     ok = await safe_ban(bot, chat_id, target_id, context="kick")
     if sticky:
         # The ban stays: Telegram then blocks every re-entry attempt.
@@ -315,6 +392,11 @@ async def mute_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Act
                     target_id: int, target_name: str = "", duration: int | None = None,
                     reason: str = "", delete_message_id: int | None = None,
                     chat_title: str = "", source: str = "command") -> str:
+    if source in {"command", "panel"}:
+        denied = await _manual_action_error(bot, session, chat_id=chat_id,
+                                            actor=actor, target_id=target_id)
+        if denied:
+            return denied
     until = datetime.utcnow() + timedelta(seconds=duration) if duration else None
     ok = await safe_restrict(bot, chat_id, target_id, MUTE_PERMISSIONS, until_date=until,
                              context="mute")
@@ -346,6 +428,23 @@ async def mute_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Act
 async def unmute_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Actor,
                       target_id: int, target_name: str = "", chat_title: str = "",
                       reason: str = "", source: str = "command") -> str:
+    action_rows = (await session.execute(
+        select(ModerationAction).where(
+            ModerationAction.chat_id == chat_id,
+            ModerationAction.target_id == target_id,
+            ModerationAction.action.in_(("mute", "temp_mute")),
+            ModerationAction.active.is_(True),
+        )
+    )).scalars().all()
+    now = datetime.utcnow()
+    protected_ids = [item.actor_id for item in action_rows
+                     if item.expires_at is None or item.expires_at > now]
+    denied = await _manual_action_error(
+        bot, session, chat_id=chat_id, actor=actor, target_id=target_id,
+        protected_actor_ids=protected_ids)
+    if denied:
+        return denied
+
     ok = await safe_restrict(bot, chat_id, target_id, UNMUTE_PERMISSIONS, context="unmute")
     await close_active_actions(session, chat_id, target_id, "mute", undone_by=actor.user_id)
     await close_active_actions(session, chat_id, target_id, "temp_mute", undone_by=actor.user_id)
@@ -376,6 +475,11 @@ async def warn_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Act
                     delete_message_id: int | None = None, chat_title: str = "",
                     source: str = "command") -> tuple[str, dict[str, Any]]:
     """Add a warning and execute the threshold action when the limit is hit."""
+    if source in {"command", "panel"}:
+        denied = await _manual_action_error(bot, session, chat_id=chat_id,
+                                            actor=actor, target_id=target_id)
+        if denied:
+            return denied, {"denied": True}
     settings_obj = await get_settings(session, chat_id)
     warn_limit = int(settings_obj.warn_limit or 4)
     expires_at = None
@@ -441,7 +545,15 @@ async def unwarn_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: A
     )
     warning = result.scalars().first()
     if warning is None:
-        return "ℹ️ این کاربر اخطار فعالی ندارد."
+        denied = await _manual_action_error(
+            bot, session, chat_id=chat_id, actor=actor, target_id=target_id,
+            allow_absent=True)
+        return denied or "ℹ️ این کاربر اخطار فعالی ندارد."
+    denied = await _manual_action_error(
+        bot, session, chat_id=chat_id, actor=actor, target_id=target_id,
+        protected_actor_ids=[warning.moderator_id], allow_absent=True)
+    if denied:
+        return denied
     warning.active = False
     warning.removed_at = datetime.utcnow()
     warning.removed_by = actor.user_id
@@ -462,26 +574,40 @@ async def unwarn_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: A
 
 
 async def reset_warnings(session: AsyncSession, chat_id: int, user_id: int, *,
-                         by_id: int | None = None, auto: bool = False) -> int:
+                         by_id: int | None = None, auto: bool = False,
+                         bot: Bot | None = None, actor: Actor | None = None) -> int | str:
     result = await session.execute(
         select(Warning).where(Warning.chat_id == chat_id, Warning.user_id == user_id,
                               Warning.active.is_(True))
     )
-    count = 0
-    for warning in result.scalars().all():
+    warnings = list(result.scalars().all())
+    if not auto:
+        if bot is None or actor is None:
+            return "⛔️ برای پاک‌کردن اخطارها، هویت و دسترسی مدیر باید دوباره بررسی شود."
+        denied = await _manual_action_error(
+            bot, session, chat_id=chat_id, actor=actor, target_id=user_id,
+            protected_actor_ids=[warning.moderator_id for warning in warnings],
+            allow_absent=True)
+        if denied:
+            return denied
+
+    now = datetime.utcnow()
+    for warning in warnings:
         warning.active = False
-        warning.removed_at = datetime.utcnow()
-        warning.removed_by = by_id
-        count += 1
+        warning.removed_at = now
+        warning.removed_by = actor.user_id if actor is not None else by_id
+    count = len(warnings)
     state = await get_member_state(session, chat_id, user_id)
     state.warn_count = 0
-    state.updated_at = datetime.utcnow()
+    state.updated_at = now
     await session.flush()
     invalidate_member(chat_id, user_id)
-    if not auto and count:
+    if count:
         session.add(ModerationAction(
-            chat_id=chat_id, target_id=user_id, actor_id=by_id, action="reset_warn",
-            reason="", created_at=datetime.utcnow(), active=False, source="command"))
+            chat_id=chat_id, target_id=user_id,
+            actor_id=actor.user_id if actor is not None else by_id,
+            action="reset_warn", reason="", created_at=now,
+            active=False, source="auto" if auto else "command"))
     return count
 
 
@@ -554,20 +680,69 @@ async def apply_action(bot: Bot, session: AsyncSession, *, chat_id: int, target_
     return ""
 
 
-async def user_history(session: AsyncSession, chat_id: int, user_id: int, limit: int = 15) -> list[ModerationAction]:
-    result = await session.execute(
+async def user_history(session: AsyncSession, chat_id: int, user_id: int,
+                       limit: int | None = None, offset: int = 0) -> list[ModerationAction]:
+    """Return moderation events done to *or by* ``user_id`` in this chat.
+
+    No default limit is applied: the history command is intended to be complete.
+    Callers may request a page with ``limit`` and ``offset``.
+    """
+    statement = (
         select(ModerationAction)
-        .where(ModerationAction.chat_id == chat_id, ModerationAction.target_id == user_id)
-        .order_by(ModerationAction.created_at.desc())
-        .limit(limit)
+        .where(
+            ModerationAction.chat_id == chat_id,
+            or_(ModerationAction.target_id == user_id,
+                ModerationAction.actor_id == user_id),
+        )
+        .order_by(ModerationAction.created_at.desc(), ModerationAction.id.desc())
     )
+    if limit is not None:
+        statement = statement.limit(max(0, int(limit)))
+    if offset:
+        statement = statement.offset(max(0, int(offset)))
+    result = await session.execute(statement)
     return list(result.scalars().all())
+
+
+async def user_history_count(session: AsyncSession, chat_id: int, user_id: int) -> int:
+    result = await session.execute(
+        select(func.count(ModerationAction.id)).where(
+            ModerationAction.chat_id == chat_id,
+            or_(ModerationAction.target_id == user_id,
+                ModerationAction.actor_id == user_id),
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+async def history_user_names(session: AsyncSession,
+                             actions: list[ModerationAction]) -> dict[int, str]:
+    """Resolve names for every actor and target shown in a history view."""
+    user_ids = {
+        user_id
+        for item in actions
+        for user_id in (item.actor_id, item.target_id, getattr(item, "undone_by", None))
+        if user_id is not None
+    }
+    if not user_ids:
+        return {}
+    result = await session.execute(select(User).where(User.id.in_(user_ids)))
+    names: dict[int, str] = {}
+    for user in result.scalars().all():
+        full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        names[user.id] = full_name or (f"@{user.username}" if user.username else str(user.id))
+    for user_id in user_ids:
+        names.setdefault(user_id, str(user_id))
+    return names
 
 
 async def clear_history(session: AsyncSession, chat_id: int, user_id: int) -> int:
     result = await session.execute(
-        delete(ModerationAction).where(ModerationAction.chat_id == chat_id,
-                                       ModerationAction.target_id == user_id)
+        delete(ModerationAction).where(
+            ModerationAction.chat_id == chat_id,
+            or_(ModerationAction.target_id == user_id,
+                ModerationAction.actor_id == user_id),
+        )
     )
     await session.execute(
         delete(ChatMemberState).where(ChatMemberState.chat_id == chat_id,
@@ -576,16 +751,97 @@ async def clear_history(session: AsyncSession, chat_id: int, user_id: int) -> in
     return int(result.rowcount or 0)
 
 
-def history_text(actions: list[ModerationAction], title: str = "📜 تاریخچه کاربر") -> str:
+def _history_user(user_id: int | None, user_names: dict[int, str]) -> str:
+    if user_id is None:
+        return "سیستم"
+    return escape(user_names.get(user_id, str(user_id)), quote=False)
+
+
+def _history_source(source: str) -> str:
+    return escape(HISTORY_SOURCE_LABELS_FA.get(source, "سیستم"), quote=False)
+
+
+def history_text(actions: list[ModerationAction], title: str = "📜 تاریخچه کاربر", *,
+                 user_id: int | None = None,
+                 user_names: dict[int, str] | None = None,
+                 total_count: int | None = None,
+                 page: int = 0,
+                 page_size: int | None = None) -> str:
+    """Render a directional moderation-history page with second precision."""
+    total = len(actions) if total_count is None else max(0, int(total_count))
     if not actions:
-        return f"{title}\n\nهیچ سابقه‌ای ثبت نشده است."
-    lines = [title, ""]
+        return f"{escape(title, quote=False)}\n\nهیچ سابقه‌ای ثبت نشده است."
+
+    names = user_names or {}
+    header = f"🔢 تعداد رویدادها: {to_persian_digits(str(total))}"
+    if page_size:
+        pages = max(1, (total + page_size - 1) // page_size)
+        header += (f"\n📄 صفحه {to_persian_digits(str(page + 1))} از "
+                   f"{to_persian_digits(str(pages))}")
+    blocks = [escape(title, quote=False), header]
+    now = datetime.utcnow()
+    reversible_actions = {"ban", "temp_ban", "mute", "temp_mute"}
+    event_actions = {"unban", "unmute", "unwarn", "reset_warn"}
+
     for item in actions:
-        label = ACTION_LABELS_FA.get(item.action, item.action)
-        extra = format_duration(item.duration) if item.duration else ""
-        lines.append(
-            f"• {label} | {persian_datetime(item.created_at)}"
-            + (f" | ⏱ {extra}" if extra else "")
-            + (f" | 📌 {item.reason}" if item.reason else "")
-        )
-    return "\n".join(lines)
+        label = escape(ACTION_LABELS_FA.get(item.action, item.action), quote=False)
+        actor_name = _history_user(item.actor_id, names)
+        target_name = _history_user(item.target_id, names)
+        if user_id is not None and item.actor_id == user_id and item.target_id == user_id:
+            direction = " (اقدام روی خودش)"
+        elif user_id is not None and item.actor_id == user_id:
+            direction = " (انجام‌شده توسط کاربر)"
+        elif user_id is not None and item.target_id == user_id:
+            direction = " (انجام‌شده روی کاربر)"
+        else:
+            direction = ""
+
+        lines = [f"• {label}{direction}",
+                 f"  👮 انجام‌دهنده: {actor_name}",
+                 f"  🎯 هدف: {target_name}",
+                 f"  📅 {persian_datetime(item.created_at, with_seconds=True)}"]
+        if item.duration:
+            lines.append(f"  ⏱ مدت: {escape(format_duration(item.duration), quote=False)}")
+        if item.reason:
+            lines.append(f"  📌 دلیل: {escape(item.reason, quote=False)}")
+
+        if item.action in reversible_actions:
+            if item.active and item.expires_at is not None and item.expires_at <= now:
+                lines.append("  🔄 وضعیت: منقضی‌شده")
+            elif item.active:
+                lines.append("  🔄 وضعیت: فعال")
+            elif item.undone_at is not None:
+                lines.append(
+                    f"  🔄 وضعیت: لغوشده در "
+                    f"{persian_datetime(item.undone_at, with_seconds=True)} "
+                    f"توسط {_history_user(item.undone_by, names)}"
+                )
+            else:
+                lines.append("  🔄 وضعیت: پایان‌یافته")
+        elif item.action in event_actions:
+            # These records describe the reversal/reset itself, not a live state.
+            if item.source and item.source not in {"command", "panel"}:
+                lines.append(f"  ⚙️ منبع: {_history_source(item.source)}")
+        elif item.source and item.source not in {"command", "panel"}:
+            lines.append(f"  ⚙️ منبع: {_history_source(item.source)}")
+
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def split_history_text(text: str, max_chars: int = 3800) -> list[str]:
+    """Split a rendered history into Telegram-safe messages at event boundaries."""
+    max_chars = max(500, min(int(max_chars), 4000))
+    blocks = text.split("\n\n")
+    chunks: list[str] = []
+    current = ""
+    for block in blocks:
+        candidate = f"{current}\n\n{block}" if current else block
+        if current and len(candidate) > max_chars:
+            chunks.append(current)
+            current = block
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks or [text[:max_chars]]

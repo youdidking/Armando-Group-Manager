@@ -10,7 +10,7 @@ from ..core.duration import format_duration
 from ..core.normalization import to_persian_digits
 from ..core.timeutils import persian_datetime
 from ..db.models import ChatMemberState, ModerationAction, User, Warning
-from ..keyboards.factory import cb, danger, markup, primary, success
+from ..keyboards.factory import cb, danger, markup, primary, row, success
 from ..services import moderation as mod
 from ..services.moderation import PUNISHMENT_OPTIONS_FA
 from ..services.roles import role_name_fa
@@ -19,7 +19,7 @@ from .common import (
     CommandContext,
     display_name,
     ensure_bot_admin,
-    guard_target,
+    guard_moderation_target,
     require,
     undo_keyboard,
     user_html,
@@ -42,9 +42,24 @@ def _warn_card_buttons(chat_id: int, user_id: int) -> list[list]:
     return [
         [primary("🗑 کسر اخطار", cb("w", "unwarn", user_id)),
          success("♻️ صفر کردن", cb("w", "reset", user_id))],
-        [primary("📜 تاریخچه", cb("w", "history", user_id)),
+        [primary("📜 تاریخچه", cb("w", "history", user_id, 0)),
          danger("⚠️ اخطار جدید", cb("w", "warn", user_id))],
     ]
+
+
+HISTORY_PAGE_SIZE = 10
+
+
+def _history_keyboard(user_id: int, page: int, total_count: int):
+    total_pages = (total_count + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE
+    if total_pages <= 1:
+        return None
+    buttons = []
+    if page > 0:
+        buttons.append(primary("⬅️ قبلی", cb("w", "history", user_id, page - 1)))
+    if page + 1 < total_pages:
+        buttons.append(primary("بعدی ➡️", cb("w", "history", user_id, page + 1)))
+    return markup([row(*buttons)])
 
 
 async def _block_sender_chat(ctx, what: str) -> bool:
@@ -84,7 +99,7 @@ async def cmd_ban(ctx: CommandContext) -> None:
         await ctx.delete_invocation()
         return
     target, duration, reason = await _target(ctx)
-    if target is None or not await guard_target(ctx, target):
+    if target is None or not await guard_moderation_target(ctx, target):
         return
     reply_id = ctx.message.reply_to_message.message_id if ctx.message.reply_to_message else None
     text = await mod.ban_user(ctx.bot, ctx.session, chat_id=ctx.chat_id, actor=ctx.actor,
@@ -119,6 +134,8 @@ async def cmd_unban(ctx: CommandContext) -> None:
     if not target.user_id:
         await ctx.reply("❌ کاربر هدف مشخص نشد.")
         return
+    if not await guard_moderation_target(ctx, target, allow_absent=True):
+        return
     text = await mod.unban_user(ctx.bot, ctx.session, chat_id=ctx.chat_id, actor=ctx.actor,
                                 target_id=target.user_id, target_name=target.full_name,
                                 chat_title=ctx.chat_title, reason=reason)
@@ -137,7 +154,7 @@ async def cmd_kick(ctx: CommandContext) -> None:
         await ctx.delete_invocation()
         return
     target, _, reason = await _target(ctx)
-    if target is None or not await guard_target(ctx, target):
+    if target is None or not await guard_moderation_target(ctx, target):
         return
     reply_id = ctx.message.reply_to_message.message_id if ctx.message.reply_to_message else None
     sticky = bool(ctx.settings.get("sticky_ban", True))
@@ -155,7 +172,7 @@ async def cmd_mute(ctx: CommandContext) -> None:
     if not await require(ctx, role="muter", permission="restrict"):
         return
     target, duration, reason = await _target(ctx)
-    if target is None or not await guard_target(ctx, target):
+    if target is None or not await guard_moderation_target(ctx, target):
         return
     if not await ensure_bot_admin(ctx, permission="restrict"):
         return
@@ -176,7 +193,7 @@ async def cmd_unmute(ctx: CommandContext) -> None:
     if not await require(ctx, role="muter", permission="restrict"):
         return
     target, _, reason = await _target(ctx)
-    if target is None or not await guard_target(ctx, target):
+    if target is None or not await guard_moderation_target(ctx, target):
         return
     text = await mod.unmute_user(ctx.bot, ctx.session, chat_id=ctx.chat_id, actor=ctx.actor,
                                  target_id=target.user_id, target_name=target.full_name,
@@ -191,7 +208,7 @@ async def cmd_warn(ctx: CommandContext) -> None:
     if not await require(ctx, role="moderator"):
         return
     target, _, reason = await _target(ctx)
-    if target is None or not await guard_target(ctx, target):
+    if target is None or not await guard_moderation_target(ctx, target):
         return
     reply_id = ctx.message.reply_to_message.message_id if ctx.message.reply_to_message else None
     text, result = await mod.warn_user(ctx.bot, ctx.session, chat_id=ctx.chat_id,
@@ -209,7 +226,7 @@ async def cmd_unwarn(ctx: CommandContext) -> None:
     if not await require(ctx, role="moderator"):
         return
     target, _, _ = await _target(ctx)
-    if target is None or not await guard_target(ctx, target):
+    if target is None or not await guard_moderation_target(ctx, target):
         return
     text = await mod.unwarn_user(ctx.bot, ctx.session, chat_id=ctx.chat_id, actor=ctx.actor,
                                  target_id=target.user_id, target_name=target.full_name,
@@ -224,9 +241,13 @@ async def cmd_reset_warn(ctx: CommandContext) -> None:
     if not await require(ctx, role="moderator"):
         return
     target, _, _ = await _target(ctx)
-    if target is None or not await guard_target(ctx, target):
+    if target is None or not await guard_moderation_target(ctx, target):
         return
-    count = await mod.reset_warnings(ctx.session, ctx.chat_id, target.user_id, by_id=ctx.user_id)
+    count = await mod.reset_warnings(ctx.session, ctx.chat_id, target.user_id,
+                                    by_id=ctx.user_id, bot=ctx.bot, actor=ctx.actor)
+    if isinstance(count, str):
+        await ctx.reply(count)
+        return
     await ctx.reply(f"♻️ {to_persian_digits(str(count))} اخطار از "
                     f"{user_html(target.user_id, target.full_name)} پاک شد.", reply_to=False)
     await ctx.delete_invocation()
@@ -258,9 +279,16 @@ async def cmd_history(ctx: CommandContext) -> None:
     if target is None or not target.user_id:
         await ctx.reply("❌ کاربر هدف مشخص نشد.")
         return
-    actions = await mod.user_history(ctx.session, ctx.chat_id, target.user_id)
+    page = 0
+    total_count = await mod.user_history_count(ctx.session, ctx.chat_id, target.user_id)
+    actions = await mod.user_history(ctx.session, ctx.chat_id, target.user_id,
+                                    limit=HISTORY_PAGE_SIZE, offset=page * HISTORY_PAGE_SIZE)
+    names = await mod.history_user_names(ctx.session, actions)
     name = await display_name(ctx.session, target.user_id)
-    await ctx.reply(mod.history_text(actions, title=f"📜 تاریخچه {name}"))
+    text = mod.history_text(actions, title=f"📜 تاریخچه {name}", user_id=target.user_id,
+                            user_names=names, total_count=total_count,
+                            page=page, page_size=HISTORY_PAGE_SIZE)
+    await ctx.reply(text, reply_markup=_history_keyboard(target.user_id, page, total_count))
 
 
 @command("تعداد اخطار", "سقف اخطار", role="admin", permission="manage",

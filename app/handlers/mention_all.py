@@ -13,6 +13,7 @@ from .common import CommandContext, require
 from .registry import command
 
 logger = logging.getLogger("armando.handlers.mention_all")
+_ACTIVE_CHATS: set[int] = set()
 
 
 @command("تگ همه", "منشن همه", "صدا زدن همه", "فراخوانی همه", "تگ اعضا", "منشن اعضا",
@@ -46,32 +47,39 @@ async def cmd_mention_all(ctx: CommandContext) -> None:
     # mention run does not hold its per-update DB transaction/connection open.
     await ctx.session.commit()
 
-    reply_kwargs = {}
-    target = ctx.message.reply_to_message
-    if target is not None:
-        reply_kwargs["reply_parameters"] = ReplyParameters(
-            message_id=target.message_id, allow_sending_without_reply=True)
-    thread_id = getattr(ctx.message, "message_thread_id", None)
-    if thread_id is not None:
-        reply_kwargs["message_thread_id"] = thread_id
+    if ctx.chat_id in _ACTIVE_CHATS:
+        await ctx.reply("⏳ ارسال تگ همه در این گروه هنوز ادامه دارد؛ درخواست تکراری اجرا نشد.")
+        return
+    _ACTIVE_CHATS.add(ctx.chat_id)
 
-    sent_messages = 0
-    sent_mentions = 0
-    for index, (text, entities) in enumerate(batches):
-        # ``parse_mode=None`` is essential: the bot sets HTML as its global
-        # default and Telegram then re-parses the text, throwing the mention
-        # entities away. Preserve the command's reply target and topic for each
-        # batch so all mention messages remain attached to the original post.
-        message = await safe_send(
-            ctx.bot, ctx.chat_id, text, entities=entities,
-            parse_mode=None, disable_web_page_preview=True, **reply_kwargs)
-        if message is not None:
-            sent_messages += 1
-            sent_mentions += len(entities)
-        if index + 1 < len(batches):
-            await asyncio.sleep(mention_service.SEND_DELAY)
+    try:
+        reply_kwargs = {}
+        target = ctx.message.reply_to_message
+        if target is not None:
+            reply_kwargs["reply_parameters"] = ReplyParameters(
+                message_id=target.message_id, allow_sending_without_reply=True)
+        thread_id = getattr(ctx.message, "message_thread_id", None)
+        if thread_id is not None:
+            reply_kwargs["message_thread_id"] = thread_id
 
-    expected_mentions = len(mention_service.mentioned_ids(batches))
-    logger.info(
-        "mention-all: sent %s/%s messages and %s/%s mentions (chat=%s)",
-        sent_messages, len(batches), sent_mentions, expected_mentions, ctx.chat_id)
+        sent_messages = 0
+        sent_mentions = 0
+        for index, (text, entities) in enumerate(batches):
+            # ``parse_mode=None`` is essential: the bot sets HTML as its global
+            # default and Telegram then re-parses the text, throwing the mention
+            # entities away. Preserve the reply target and topic for every batch.
+            message = await safe_send(
+                ctx.bot, ctx.chat_id, text, entities=entities,
+                parse_mode=None, disable_web_page_preview=True, **reply_kwargs)
+            if message is not None:
+                sent_messages += 1
+                sent_mentions += len(entities)
+            if index + 1 < len(batches):
+                await asyncio.sleep(mention_service.SEND_DELAY)
+
+        expected_mentions = len(mention_service.mentioned_ids(batches))
+        logger.info(
+            "mention-all: sent %s/%s messages and %s/%s mentions (chat=%s)",
+            sent_messages, len(batches), sent_mentions, expected_mentions, ctx.chat_id)
+    finally:
+        _ACTIVE_CHATS.discard(ctx.chat_id)

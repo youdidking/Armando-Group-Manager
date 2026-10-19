@@ -15,7 +15,7 @@ from ..core.errors import safe_delete, safe_send
 from ..core.normalization import normalize_text
 from ..db.models import User
 from ..keyboards.factory import InlineKeyboardMarkup, cb, markup, primary, row
-from ..services.permissions import Actor, check_target
+from ..services.permissions import Actor, check_moderation_target, check_target
 from ..services.targeting import TargetResult, extract_duration_and_reason, resolve_target
 
 logger = logging.getLogger("armando.handlers")
@@ -219,6 +219,25 @@ async def guard_target(ctx: CommandContext, target: TargetResult,
         return False
     reason = await check_target(ctx.bot, ctx.chat_id, target.user_id, ctx.actor,
                                 allow_admin=allow_admin)
+    if reason:
+        await ctx.reply(reason)
+        return False
+    return True
+
+
+async def guard_moderation_target(ctx: CommandContext, target: TargetResult, *,
+                                 allow_absent: bool = False) -> bool:
+    """Validate a moderation target using the group-owner hierarchy."""
+    if target.error:
+        await ctx.reply(target.error)
+        return False
+    if not target.user_id:
+        await ctx.reply("❌ کاربر هدف مشخص نشد.")
+        return False
+    reason = await check_moderation_target(
+        ctx.bot, ctx.session, ctx.chat_id, target.user_id, ctx.actor,
+        allow_absent=allow_absent,
+    )
     if reason:
         await ctx.reply(reason)
         return False

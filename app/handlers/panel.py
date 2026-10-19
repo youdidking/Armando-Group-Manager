@@ -684,6 +684,10 @@ async def on_warn_action(callback: CallbackQuery, session: AsyncSession, bot: Bo
         return
     action, raw_user = parts[1], parts[2]
     user_id = int(raw_user) if raw_user.isdigit() else 0
+    try:
+        history_page = max(0, int(parts[3])) if len(parts) > 3 else 0
+    except ValueError:
+        history_page = 0
     chat_id = await _panel_chat_id(callback, session)
     actor = await permissions.build_actor(bot, chat_id, callback.from_user.id, session=session)
     if not (actor.can_ban() or actor.can_restrict() or actor.has_role("moderator")):
@@ -695,6 +699,8 @@ async def on_warn_action(callback: CallbackQuery, session: AsyncSession, bot: Bo
     await safe_answer(callback, "⏳ ...")
     from ..services import moderation as mod
 
+    history_markup = None
+    history_mode = False
     if action == "warn":
         text, _ = await mod.warn_user(bot, session, chat_id=chat_id, actor=actor,
                                       target_id=user_id, target_name=str(user_id),
@@ -703,14 +709,35 @@ async def on_warn_action(callback: CallbackQuery, session: AsyncSession, bot: Bo
         text = await mod.unwarn_user(bot, session, chat_id=chat_id, actor=actor,
                                      target_id=user_id, target_name=str(user_id))
     elif action == "reset":
-        count = await mod.reset_warnings(session, chat_id, user_id, by_id=callback.from_user.id)
-        text = f"♻️ {to_persian_digits(str(count))} اخطار پاک شد."
+        count = await mod.reset_warnings(session, chat_id, user_id,
+                                         by_id=callback.from_user.id, bot=bot, actor=actor)
+        text = count if isinstance(count, str) else f"♻️ {to_persian_digits(str(count))} اخطار پاک شد."
     elif action == "history":
-        actions = await mod.user_history(session, chat_id, user_id)
-        text = mod.history_text(actions)
+        page_size = 10
+        total_count = await mod.user_history_count(session, chat_id, user_id)
+        total_pages = max(1, (total_count + page_size - 1) // page_size)
+        history_page = min(history_page, total_pages - 1)
+        actions = await mod.user_history(session, chat_id, user_id,
+                                         limit=page_size, offset=history_page * page_size)
+        names = await mod.history_user_names(session, actions)
+        title = f"📜 تاریخچه {names.get(user_id, str(user_id))}"
+        text = mod.history_text(actions, title=title, user_id=user_id, user_names=names,
+                                total_count=total_count, page=history_page,
+                                page_size=page_size)
+        nav = []
+        if history_page > 0:
+            nav.append(primary("⬅️ قبلی", cb("w", "history", user_id, history_page - 1)))
+        if history_page + 1 < total_pages:
+            nav.append(primary("بعدی ➡️", cb("w", "history", user_id, history_page + 1)))
+        history_markup = markup([nav]) if nav else None
+        history_mode = True
     else:
         text = "ℹ️ عملیات نامشخص است."
-    await safe_edit(callback.message, text)
+    if history_mode:
+        await safe_edit(callback.message, text, parse_mode=ParseMode.HTML,
+                        reply_markup=history_markup)
+    else:
+        await safe_edit(callback.message, text)
 
 
 @router.callback_query(F.data.startswith("locknum:"))
@@ -847,6 +874,9 @@ async def on_undo(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> N
         await safe_answer(callback)
         return
 
+    if text.startswith(("⛔️", "⚠️", "ℹ️")):
+        await safe_answer(callback, text, show_alert=True)
+        return
     await safe_answer(callback)
     if callback.message:
         await safe_edit(callback.message, f"↩️ <b>لغو شد</b>\n\n{text}")

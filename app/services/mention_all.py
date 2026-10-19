@@ -1,10 +1,10 @@
-"""Mention known group members with the largest safe Telegram batches.
+"""Mention known group members in notification-oriented batches.
 
 The Bot API does not expose a complete member roster, so the service can only
 mention users observed by :mod:`app.services.roster` (messages, joins, activity,
-reactions and available administrators). Each message is limited by Telegram's
-text size and a conservative 50-mention ceiling. ``text_mention`` entities are
-built with UTF-16 offsets, as required by Telegram.
+reactions and available administrators). Batches use five users each, the
+conservative notification-oriented approach used by active mention bots.
+``text_mention`` entities are built with UTF-16 offsets, as Telegram requires.
 """
 
 from __future__ import annotations
@@ -22,18 +22,18 @@ from . import roster
 
 logger = logging.getLogger("armando.mentionall")
 
-# Use the largest practical mention batch. The 50-entity ceiling and the
-# first-five-notifications behavior come from Telegram limit references; the
-# Bot API documents the 4096-character text limit but not these mention rules.
-MENTIONS_PER_MESSAGE = 50
-# Safety rail: never flood a group with an endless stream of messages.
-MAX_MENTION_MESSAGES = 40
-# The Bot FAQ recommends no more than 20 group messages/minute. Leave a little
-# room for other bot traffic with a delay slightly above three seconds.
+# Send five real text_mention entities per message. Bot API docs do not promise
+# a notification count; active mention-bot projects use five as the cautious
+# batch size for individual mention alerts.
+MENTIONS_PER_MESSAGE = 5
+# Hard bounds for one invocation: at most 1000 known members in 200 messages.
+MAX_MENTION_MESSAGES = 200
+# Telegram's Bot FAQ says groups are limited to 20 bot messages/minute. A little
+# over three seconds between batches leaves some room for ordinary bot traffic.
 SEND_DELAY = 3.2
 
 TELEGRAM_MESSAGE_LIMIT = 4096
-# Hard safety cap: a bot should never try to ping a whole city at once.
+# Do not try to ping an unbounded roster in one command.
 MAX_MEMBERS = 1000
 
 HEADER = "📣 فراخوانی اعضا"

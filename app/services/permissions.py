@@ -66,6 +66,16 @@ class Actor:
         return self.telegram_status == "creator"
 
     @property
+    def is_group_creator(self) -> bool:
+        """True only for Telegram's creator inside a real group chat.
+
+        ``build_actor`` also uses the ``creator`` status for the bot owner in
+        private chats; that privilege must never be confused with the owner of
+        a Telegram group when enforcing moderation hierarchy.
+        """
+        return self.chat_type in {"group", "supergroup"} and self.telegram_status == "creator"
+
+    @property
     def is_telegram_admin(self) -> bool:
         return self.telegram_status in {"administrator", "creator"}
 
@@ -364,8 +374,11 @@ class TargetProtection:
 
     OK = ""
     BOT_ITSELF = "⛔️ امکان اعمال محدودیت روی خود ربات وجود ندارد."
+    SELF_ACTION = "⛔️ نمی‌توانید روی حساب خودتان اخطار، سکوت یا بن اعمال/لغو کنید."
     CHAT_OWNER = "⛔️ مالک گروه قابل محدودسازی نیست."
     OTHER_ADMIN = "⛔️ کاربر هدف یکی از مدیران گروه است."
+    MODERATION_ADMIN_ONLY = "⛔️ فقط مالک گروه می‌تواند روی ادمین‌های گروه اقدام کند."
+    UNKNOWN_TARGET = "⚠️ وضعیت هدف مشخص نشد؛ برای بررسی جایگاه ادمین دوباره تلاش کنید."
     BOT_OWNER = "⛔️ مالک ربات قابل محدودسازی نیست."
     NOT_MEMBER = "❌ کاربر هدف در این گروه حضور ندارد."
     DELETED = "❌ حساب کاربر هدف حذف شده است."
@@ -396,6 +409,35 @@ async def check_target(bot: Bot, chat_id: int, target_id: int, actor: Actor,
             return ""
         return TargetProtection.OTHER_ADMIN
     return ""
+
+
+async def check_moderation_target(bot: Bot, session, chat_id: int, target_id: int,
+                                 actor: Actor, *, allow_absent: bool = False) -> str:
+    """Apply the moderation-specific hierarchy without changing other tools.
+
+    The Telegram chat creator is the only person who may moderate a Telegram
+    administrator.  An actor may never moderate themselves.  ``allow_absent``
+    is used only by unban, which must also work for users who have already left.
+    """
+    if target_id == actor.user_id:
+        return TargetProtection.SELF_ACTION
+
+    base_reason = await check_target(bot, chat_id, target_id, actor)
+    if base_reason in {TargetProtection.BOT_ITSELF, TargetProtection.BOT_OWNER,
+                       TargetProtection.CHAT_OWNER}:
+        return base_reason
+
+    target_actor = await build_actor(bot, chat_id, target_id, session=session)
+    if not target_actor.rights_known and not actor.is_group_creator:
+        return TargetProtection.UNKNOWN_TARGET
+    if target_actor.is_group_creator:
+        return TargetProtection.CHAT_OWNER
+    if target_actor.is_telegram_admin and not actor.is_group_creator:
+        return TargetProtection.MODERATION_ADMIN_ONLY
+
+    if allow_absent and base_reason == TargetProtection.NOT_MEMBER:
+        return ""
+    return base_reason
 
 
 def require(condition: bool, message: str = "⛔️ شما اجازه انجام این کار را ندارید.") -> None:
