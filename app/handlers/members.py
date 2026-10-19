@@ -15,6 +15,7 @@ from ..core.normalization import to_persian_digits
 from ..db.models import Chat
 from ..services import antiraid, captcha, connection as connection_service
 from ..services import gban as gban_service
+from ..services import global_mute as global_mute_service
 from ..services import leave_guard
 from ..services import roster as roster_service
 from ..services import moderation as mod
@@ -127,6 +128,17 @@ async def on_new_members(message: Message, session: AsyncSession, bot: Bot) -> N
                     clean=bool(settings_obj.clean_join))
                 continue
 
+        # A globally muted user is restricted on entry only where the bot owner
+        # is an administrator/creator and the bot has the required right.
+        global_mute_reason = await global_mute_service.is_muted(session, user.id)
+        if global_mute_reason is not None:
+            enforced = await global_mute_service.enforce(
+                bot, session, chat_id=message.chat.id, user_id=user.id,
+                user_name=user.full_name or "", reason=global_mute_reason,
+                notify=True)
+            if enforced:
+                continue
+
         # Federation enforcement
         if settings_obj.federation_id and settings_obj.fed_enforce:
             from ..services import federation as fed_service
@@ -209,18 +221,24 @@ async def on_chat_member(update: ChatMemberUpdated, session: AsyncSession, bot: 
                 parse_mode="HTML")
             return
 
-    if not app_settings.global_ban_enabled:
-        return
+    if user.id == int(app_settings.owner_id or 0):
+        global_mute_service.invalidate_chat(update.chat.id)
     joined = old.status in {"left", "kicked"} and new.status in {
         "member", "administrator", "creator", "restricted"}
     if not joined:
         return
-    reason = await gban_service.is_banned(session, user.id)
-    if reason is None:
-        return
-    await gban_service.enforce(bot, session, chat_id=update.chat.id,
-                               chat_title=update.chat.title or "", user_id=user.id,
-                               user_name=user.full_name or "", reason=reason)
+    if app_settings.global_ban_enabled:
+        reason = await gban_service.is_banned(session, user.id)
+        if reason is not None:
+            await gban_service.enforce(bot, session, chat_id=update.chat.id,
+                                       chat_title=update.chat.title or "", user_id=user.id,
+                                       user_name=user.full_name or "", reason=reason)
+            return
+    mute_reason = await global_mute_service.is_muted(session, user.id)
+    if mute_reason is not None:
+        await global_mute_service.enforce(
+            bot, session, chat_id=update.chat.id, user_id=user.id,
+            user_name=user.full_name or "", reason=mute_reason, notify=True)
 
 
 @router.message(F.left_chat_member)
@@ -326,6 +344,7 @@ async def on_my_chat_member(update: ChatMemberUpdated, session: AsyncSession, bo
         logger.info("bot removed from chat %s", update.chat.id)
     elif new_status == "member":
         chat.bot_is_admin = False
+    global_mute_service.invalidate_chat(update.chat.id)
     await session.flush()
 
 
@@ -336,15 +355,21 @@ async def on_message_reaction(update: MessageReactionUpdated, session: AsyncSess
     user = getattr(update, "user", None)
     if user is None and getattr(update, "actor_chat", None) is not None:
         return  # a channel reacted, not a member we could mention
+    if user is None:
+        return
     await roster_service.remember(session, update.chat.id, user)
-    if not app_settings.global_ban_enabled or user is None:
-        return
-    reason = await gban_service.is_banned(session, user.id)
-    if reason is None:
-        return
-    await gban_service.enforce(bot, session, chat_id=update.chat.id,
-                               chat_title=update.chat.title or "", user_id=user.id,
-                               user_name=user.full_name or "", reason=reason)
+    if app_settings.global_ban_enabled:
+        reason = await gban_service.is_banned(session, user.id)
+        if reason is not None:
+            await gban_service.enforce(bot, session, chat_id=update.chat.id,
+                                       chat_title=update.chat.title or "", user_id=user.id,
+                                       user_name=user.full_name or "", reason=reason)
+            return
+    mute_reason = await global_mute_service.is_muted(session, user.id)
+    if mute_reason is not None:
+        await global_mute_service.enforce(
+            bot, session, chat_id=update.chat.id, user_id=user.id,
+            user_name=user.full_name or "", reason=mute_reason)
 
 
 @router.callback_query(F.data.startswith("cap:"))

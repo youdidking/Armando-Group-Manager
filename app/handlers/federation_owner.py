@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from datetime import datetime
 
@@ -11,9 +12,11 @@ from sqlalchemy import func, select
 from ..config import settings
 from ..core.normalization import to_persian_digits
 from ..core.timeutils import persian_datetime
-from ..db.models import BanRecord, Chat, ModerationAction, User
+from ..db.models import BanRecord, Chat, GlobalMute, ModerationAction, User
 from ..services import federation as fed_service
 from ..services import gban as gban_service
+from ..services import global_mute as global_mute_service
+from ..services import owner_access
 from ..services.chat_state import invalidate_settings
 from .common import CommandContext, require, user_html
 from .registry import command
@@ -29,6 +32,13 @@ async def _current_fed(ctx: CommandContext):
         return None, settings_obj
     fed = await fed_service.get_fed_by_id(ctx.session, int(settings_obj.federation_id))
     return fed, settings_obj
+
+
+async def _may_use_owner_permission(ctx: CommandContext, permission: str) -> bool:
+    """Owner bypass; delegated capabilities stay limited to their granted chat."""
+    return await owner_access.can_use_root_permission(
+        ctx.bot, ctx.session, chat_id=ctx.chat_id, user_id=ctx.user_id,
+        permission=permission)
 
 
 # --------------------------------------------------------------------------- #
@@ -270,13 +280,40 @@ async def _rollout(bot, user_id: int, reason: str, source_chat_id: int, *,
 
         await safe_send(bot, source_chat_id, text, parse_mode="HTML")
 
+
+async def _global_mute_rollout(bot, user_id: int, source_chat_id: int, *,
+                               snapshot=None) -> None:
+    """Apply or lift a global mute after its database state has been committed."""
+    from ..db import session_scope
+    from ..core.errors import safe_send
+
+    try:
+        async with session_scope() as session:
+            if snapshot is None:
+                count = await global_mute_service.apply_everywhere(
+                    bot, session, user_id)
+                text = (f"🔇 سکوت سراسری در {to_persian_digits(str(count))} گروه اعمال شد."
+                        if count else
+                        "ℹ️ گروهی که هم‌زمان شرایط لازم را داشته باشد پیدا نشد؛ "
+                        "در گروه‌های ثبت‌شده‌ای اعمال می‌شود که مالک بات مدیر و ربات دارای حق محدودسازی باشد.")
+            else:
+                count = await global_mute_service.lift_everywhere(
+                    bot, session, snapshot)
+                text = f"🔊 سکوت سراسری در {to_persian_digits(str(count))} گروه برداشته شد."
+    except Exception:  # noqa: BLE001 - a background rollout must not crash the bot
+        logger.exception("global mute rollout failed user=%s", user_id)
+        return
+    await safe_send(bot, source_chat_id, text, parse_mode="HTML")
+
+
 # --------------------------------------------------------------------------- #
 # Owner only (global features are OFF unless explicitly enabled)
 # --------------------------------------------------------------------------- #
 @command("بن سراسری", role="founder", category="owner", description="بن سراسری (مالک ربات)",
          allow_in_private=True)
 async def cmd_global_ban(ctx: CommandContext) -> None:
-    if not ctx.actor.is_bot_owner:
+    if not await _may_use_owner_permission(ctx, "global_ban"):
+        await ctx.reply("⛔️ این فرمان فقط برای مالک ربات یا ادمینی که اختیار «بن سراسری» را در همین چت گرفته باشد مجاز است.")
         return
     if not settings.global_ban_enabled:
         await ctx.reply("🔒 قابلیت بن سراسری غیرفعال است.\n"
@@ -318,7 +355,8 @@ async def cmd_global_ban(ctx: CommandContext) -> None:
 @command("رفع بن سراسری", role="founder", category="owner",
          description="رفع بن سراسری (مالک ربات)", allow_in_private=True)
 async def cmd_global_unban(ctx: CommandContext) -> None:
-    if not ctx.actor.is_bot_owner:
+    if not await _may_use_owner_permission(ctx, "global_ban"):
+        await ctx.reply("⛔️ این فرمان فقط برای مالک ربات یا دارندهٔ اختیار «بن سراسری» در همین چت مجاز است.")
         return
     target = await ctx.target()
     user_id = target.user_id if target else None
@@ -354,7 +392,8 @@ async def cmd_global_unban(ctx: CommandContext) -> None:
 @command("لیست بن سراسری", role="founder", category="owner",
          description="نمایش بن‌های سراسری", allow_in_private=True)
 async def cmd_global_ban_list(ctx: CommandContext) -> None:
-    if not ctx.actor.is_bot_owner:
+    if not await _may_use_owner_permission(ctx, "global_ban"):
+        await ctx.reply("⛔️ این فهرست فقط برای مالک ربات یا دارندهٔ اختیار «بن سراسری» در همین چت است.")
         return
     result = await ctx.session.execute(
         select(BanRecord).where(BanRecord.scope == "global", BanRecord.active.is_(True)).limit(50))
@@ -369,17 +408,100 @@ async def cmd_global_ban_list(ctx: CommandContext) -> None:
     await ctx.reply("\n".join(lines))
 
 
+@command("سکوت سراسری", role="founder", category="owner",
+         description="ساکت‌کردن کاربر در گروه‌های واجد شرایط", allow_in_private=True)
+async def cmd_global_mute(ctx: CommandContext) -> None:
+    if not await _may_use_owner_permission(ctx, "global_mute"):
+        await ctx.reply("⛔️ این فرمان فقط برای مالک ربات یا دارندهٔ اختیار «سکوت سراسری» در همین چت مجاز است.")
+        return
+    target = await ctx.target()
+    if target is None or target.error or not target.user_id:
+        await ctx.reply((target.error if target else None) or "❌ کاربر هدف مشخص نشد.")
+        return
+    if int(target.user_id) in {
+            int(ctx.bot.id), int(ctx.user_id), int(settings.owner_id or 0)}:
+        await ctx.reply("⛔️ ربات، خودتان یا مالک بات نمی‌تواند هدف سکوت سراسری باشد.")
+        return
+    duration, reason = ctx.duration_and_reason(target.rest)
+    if duration is not None:
+        await ctx.reply("ℹ️ سکوت سراسری دائمی است و مدت نمی‌گیرد؛ برای لغو، «رفع سکوت سراسری» را اجرا کنید.")
+        return
+    reason = (reason or "بدون دلیل")[:300]
+    user = await ctx.session.get(User, target.user_id)
+    if user is None:
+        user = User(id=target.user_id, first_name=target.first_name or "",
+                    last_name=target.last_name, username=target.username)
+        ctx.session.add(user)
+    await global_mute_service.activate(
+        ctx.session, user_id=target.user_id, muted_by=ctx.user_id, reason=reason)
+    # Commit before starting the independent rollout session so its per-chat
+    # audit list cannot race this update transaction.
+    await ctx.session.commit()
+    await ctx.reply(
+        f"🔇 کاربر <code>{target.user_id}</code> به‌صورت سراسری ساکت شد.\n"
+        f"📌 {html.escape(reason)}\n"
+        "↻ اعمال در گروه‌های ثبت‌شده‌ای انجام می‌شود که مالک بات در آن‌ها مدیر/سازنده و ربات دارای حق محدودسازی است.")
+    asyncio.create_task(_global_mute_rollout(ctx.bot, target.user_id, ctx.chat_id))
+
+
+@command("رفع سکوت سراسری", role="founder", category="owner",
+         description="برداشتن سکوت سراسری", allow_in_private=True)
+async def cmd_global_unmute(ctx: CommandContext) -> None:
+    if not await _may_use_owner_permission(ctx, "global_mute"):
+        await ctx.reply("⛔️ این فرمان فقط برای مالک ربات یا دارندهٔ اختیار «سکوت سراسری» در همین چت مجاز است.")
+        return
+    target = await ctx.target()
+    user_id = target.user_id if target and not target.error else None
+    if not user_id and ctx.arg_text:
+        from ..core.normalization import normalize_digits
+
+        digits = normalize_digits(ctx.arg_text.strip(), to="ascii")
+        if digits.isdigit() and 5 <= len(digits) <= 15:
+            user_id = int(digits)
+    if not user_id:
+        await ctx.reply((target.error if target and target.error else None)
+                        or "❌ کاربر هدف مشخص نشد.")
+        return
+    snapshot = await global_mute_service.deactivate(ctx.session, user_id=user_id)
+    if snapshot is None:
+        await ctx.reply("ℹ️ این کاربر در سکوت سراسری نبود.")
+        return
+    await ctx.session.commit()
+    await ctx.reply(f"🔊 سکوت سراسری کاربر <code>{user_id}</code> لغو شد؛ "
+                    "برداشتن محدودیت‌های ثبت‌شده در گروه‌ها انجام می‌شود.")
+    asyncio.create_task(_global_mute_rollout(
+        ctx.bot, user_id, ctx.chat_id, snapshot=snapshot))
+
+
+@command("لیست سکوت سراسری", role="founder", category="owner",
+         description="نمایش کاربران دارای سکوت سراسری", allow_in_private=True)
+async def cmd_global_mute_list(ctx: CommandContext) -> None:
+    if not await _may_use_owner_permission(ctx, "global_mute"):
+        await ctx.reply("⛔️ این فهرست فقط برای مالک ربات یا دارندهٔ اختیار «سکوت سراسری» در همین چت است.")
+        return
+    result = await ctx.session.execute(
+        select(GlobalMute).where(GlobalMute.active.is_(True))
+        .order_by(GlobalMute.created_at.desc()).limit(50))
+    rows = list(result.scalars().all())
+    if not rows:
+        await ctx.reply("✅ هیچ سکوت سراسری فعالی وجود ندارد.")
+        return
+    lines = ["🔇 <b>سکوت‌های سراسری</b>", ""]
+    for row in rows:
+        lines.append(f"• <code>{row.user_id}</code> — 📌 {html.escape(row.reason or '—')}\n"
+                     f"   🕒 {persian_datetime(row.created_at)}")
+    await ctx.reply("\n".join(lines))
+
+
 @command("دسترسی روت", role="founder", category="owner",
          description="اعطای دسترسی روت محدود به یک گروه/کانال",
          usage="دسترسی روت @username یا شناسه", allow_in_private=True)
 async def cmd_root_grant(ctx: CommandContext) -> None:
-    if not ctx.actor.is_bot_owner:
-        return
-
-    from ..services import owner_access
-    from ..keyboards.factory import cb, danger, markup, success
-
+    is_owner = ctx.actor.is_bot_owner
     if ctx.message.chat.type == "private":
+        if not is_owner:
+            await ctx.reply("⛔️ واگذاری دسترسی از خصوصی فقط برای مالک ربات است.")
+            return
         if ctx.message.reply_to_message and ctx.message.reply_to_message.from_user:
             target_ref = str(ctx.message.reply_to_message.from_user.id)
         elif len(ctx.args) == 1:
@@ -405,12 +527,15 @@ async def cmd_root_grant(ctx: CommandContext) -> None:
     if ctx.message.chat.type not in {"group", "supergroup"}:
         await ctx.reply("⚠️ برای انتخاب کانال، این دستور را در خصوصی ربات اجرا کنید.")
         return
+    if not await _may_use_owner_permission(ctx, "root_manage"):
+        await ctx.reply("⛔️ برای واگذاری اختیار روت در این گروه، مالک ربات یا دارندهٔ دسترسی «مدیریت روت» باشید.")
+        return
     target = await ctx.target()
     if target.error or not target.user_id:
         await ctx.reply(target.error or "❌ کاربر هدف مشخص نشد.")
         return
-    if target.user_id == ctx.bot.id:
-        await ctx.reply("⛔️ خود ربات نمی‌تواند هدف دسترسی روت باشد.")
+    if target.user_id in {ctx.bot.id, ctx.user_id, settings.owner_id}:
+        await ctx.reply("⛔️ ربات، خودتان یا مالک بات را نمی‌توان هدف واگذاری قرار داد.")
         return
     try:
         user_id, name, username = await owner_access.resolve_admin_target(
@@ -418,30 +543,47 @@ async def cmd_root_grant(ctx: CommandContext) -> None:
     except owner_access.RootAccessError as exc:
         await ctx.reply(str(exc))
         return
-    created = await owner_access.grant_root(
-        ctx.session, chat_id=ctx.chat_id, user_id=user_id, granted_by=ctx.user_id)
+    try:
+        draft = await owner_access.create_root_draft(
+            ctx.session, owner_id=ctx.user_id, target_ref=str(user_id))
+    except owner_access.RootAccessError as exc:
+        await ctx.reply(str(exc))
+        return
     db_user = await ctx.session.get(User, user_id)
     if db_user is not None:
-        db_user.first_name = target.first_name or name
-        db_user.last_name = target.last_name
+        db_user.first_name = name[:128]
         db_user.username = username or target.username
-    if not created:
-        await ctx.reply(f"ℹ️ {user_html(user_id, name)} از قبل در این چت دسترسی روت دارد.")
-        return
+    allowed = (list(owner_access.ROOT_PERMISSION_KEYS) if is_owner else
+               await owner_access.permissions_for(
+                   ctx.session, chat_id=ctx.chat_id, user_id=ctx.user_id))
+    existing = await owner_access.permissions_for(
+        ctx.session, chat_id=ctx.chat_id, user_id=user_id)
+    selected = [permission for permission in existing if permission in allowed]
+    chat = await ctx.session.get(Chat, ctx.chat_id)
     await ctx.reply(
-        f"✅ دسترسی روت برای {user_html(user_id, name)} در همین چت فعال شد.\n"
-        "🔐 دسترسی فقط به چت‌های مجازش محدود است؛ این کار دسترسی مدیریتی تلگرام، "
-        "بن سراسری یا دسترسی به چت‌های دیگر نمی‌دهد.",
-        reply_markup=markup([[danger("لغو همین دسترسی", cb("rt", "revoke", ctx.chat_id, user_id))]]))
+        owner_access.root_permission_text(
+            target_name=name, user_id=user_id, chat=chat,
+            selected_permissions=selected, allowed_permissions=allowed),
+        reply_markup=owner_access.root_permission_keyboard(
+            draft, chat_id=ctx.chat_id, user_id=user_id,
+            selected_permissions=selected, allowed_permissions=allowed))
 
 
 @command("لغو دسترسی روت", role="founder", category="owner",
          description="لغو دسترسی روت محدود به چت",
          usage="لغو دسترسی روت @username یا شناسه", allow_in_private=True)
 async def cmd_root_revoke(ctx: CommandContext) -> None:
-    if not ctx.actor.is_bot_owner:
+    is_owner = ctx.actor.is_bot_owner
+    if ctx.message.chat.type == "private" and not is_owner:
+        await ctx.reply("⛔️ لغو سراسری واگذاری‌ها از خصوصی فقط برای مالک ربات است.")
         return
-    from ..services import owner_access
+    if ctx.message.chat.type not in {"private", "group", "supergroup"}:
+        await ctx.reply("⚠️ این فرمان در خصوصی یا گروه قابل اجراست.")
+        return
+    if ctx.message.chat.type in {"group", "supergroup"} and not await _may_use_owner_permission(
+            ctx, "root_manage"):
+        await ctx.reply("⛔️ برای لغو دسترسی روت در این گروه، مالک ربات یا دارندهٔ اختیار «مدیریت روت» باشید.")
+        return
     from ..core.normalization import normalize_digits
     from sqlalchemy import func
 
@@ -485,18 +627,27 @@ async def cmd_root_revoke(ctx: CommandContext) -> None:
          category="owner", description="نمایش دسترسی‌های روت",
          allow_in_private=True)
 async def cmd_root_list(ctx: CommandContext) -> None:
-    if not ctx.actor.is_bot_owner:
+    is_owner = ctx.actor.is_bot_owner
+    chat_scoped = ctx.message.chat.type in {"group", "supergroup"}
+    if ctx.message.chat.type == "private" and not is_owner:
+        await ctx.reply("⛔️ فهرست دسترسی‌های روت از خصوصی فقط برای مالک ربات است.")
         return
-    if ctx.message.chat.type != "private":
-        await ctx.reply("ℹ️ این فهرست فقط در خصوصی ربات نمایش داده می‌شود.")
+    if ctx.message.chat.type not in {"private", "group", "supergroup"}:
+        await ctx.reply("⚠️ این فهرست در خصوصی یا گروه قابل نمایش است.")
         return
-    from ..services import owner_access
-    from ..keyboards.factory import danger, markup
-    import html
+    if chat_scoped and not await _may_use_owner_permission(ctx, "root_manage"):
+        await ctx.reply("⛔️ برای دیدن دسترسی‌های روت این گروه، مالک ربات یا دارندهٔ اختیار «مدیریت روت» باشید.")
+        return
+    if not chat_scoped and not is_owner:
+        await ctx.reply("⛔️ این فهرست فقط برای مالک ربات است.")
+        return
+    from ..keyboards.factory import cb, danger, markup
 
-    grants = await owner_access.list_root_grants(ctx.session)
+    grants = await owner_access.list_root_grants(
+        ctx.session, chat_id=ctx.chat_id if chat_scoped else None)
     if not grants:
-        await ctx.reply("✅ هیچ دسترسی روتی ثبت نشده است.")
+        await ctx.reply("✅ در این محدوده دسترسی روتی ثبت نشده است." if chat_scoped
+                        else "✅ هیچ دسترسی روتی ثبت نشده است.")
         return
     lines = ["🔐 <b>دسترسی‌های روت</b>", ""]
     buttons = []
@@ -504,7 +655,9 @@ async def cmd_root_list(ctx: CommandContext) -> None:
         member_name = (f"{user.first_name or ''} {user.last_name or ''}".strip()
                        or (f"@{user.username}" if user.username else str(user.id)))
         chat_name = chat.title or (f"@{chat.username}" if chat.username else str(chat.id))
-        lines.append(f"• {html.escape(member_name)} — {html.escape(chat_name)}")
+        labels = owner_access.selected_permissions_text(grant.permissions)
+        lines.append(f"• {html.escape(member_name)} — {html.escape(chat_name)}\n"
+                     f"   🔑 {html.escape(labels)}")
         buttons.append([danger(
             f"🗑 {member_name[:18]} · {chat_name[:18]}",
             cb("rt", "revoke", chat.id, grant.user_id))])
@@ -592,7 +745,8 @@ async def cmd_broadcast(ctx: CommandContext) -> None:
 @command("آمار ربات", role="founder", category="owner", description="آمار کلی ربات",
          allow_in_private=True)
 async def cmd_bot_stats(ctx: CommandContext) -> None:
-    if not ctx.actor.is_bot_owner:
+    if not await _may_use_owner_permission(ctx, "bot_stats"):
+        await ctx.reply("⛔️ آمار کلی فقط برای مالک ربات یا دارندهٔ اختیار «آمار ربات» در همین چت است.")
         return
     chats = await ctx.session.scalar(select(func.count(Chat.id))) or 0
     active_chats = await ctx.session.scalar(
@@ -616,8 +770,11 @@ async def cmd_bot_stats(ctx: CommandContext) -> None:
 @command("ترک گروه", role="founder", category="owner", description="خروج ربات از یک گروه",
          allow_in_private=True)
 async def cmd_leave_chat(ctx: CommandContext) -> None:
-    if not ctx.actor.is_bot_owner:
-        return
+    is_owner = ctx.actor.is_bot_owner
+    if not is_owner:
+        if not ctx.is_group or not await _may_use_owner_permission(ctx, "leave_chat"):
+            await ctx.reply("⛔️ خروج ربات فقط برای مالک ربات یا دارندهٔ اختیار «خروج ربات» در همین گروه مجاز است.")
+            return
     import re
     from ..core.normalization import normalize_digits
 
@@ -627,6 +784,9 @@ async def cmd_leave_chat(ctx: CommandContext) -> None:
                         "<code>ترک گروه -100123456789</code>")
         return
     chat_id = int(raw_id)
+    if not is_owner and chat_id != int(ctx.chat_id):
+        await ctx.reply("⛔️ این اختیار فقط اجازهٔ خروج ربات از همین گروه واگذارشده را می‌دهد.")
+        return
     from ..core.errors import safe_call
 
     ok = await safe_call(lambda: ctx.bot.leave_chat(chat_id=chat_id), default=None,

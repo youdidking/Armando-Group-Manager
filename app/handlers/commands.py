@@ -184,6 +184,18 @@ async def on_text_command(message: Message, session: AsyncSession, bot: Bot,
     await get_or_create_user(session, user)
     if chat_type != "private":
         await get_or_create_chat(session, message.chat)
+        if chat_type in {"group", "supergroup"}:
+            from ..services import global_mute as global_mute_service
+
+            mute_reason = await global_mute_service.is_muted(session, user.id)
+            if mute_reason is not None:
+                enforced = await global_mute_service.enforce(
+                    bot, session, chat_id=message.chat.id, user_id=user.id,
+                    user_name=user.full_name or "", reason=mute_reason,
+                    message_id=message.message_id)
+                if enforced:
+                    await session.commit()
+                    return
 
     actor = await build_actor(bot, message.chat.id, user.id, session=session,
                               chat_type=chat_type, from_user=user)

@@ -97,10 +97,11 @@ COMMAND_HINTS: dict[str, str] = {
     "broadcast": ("📢 در خصوصی ربات بنویسید <code>ارسال همگانی</code> و پیام/متن را تعیین کنید؛ "
                    "مقصدها را انتخاب و مرور کنید. ارسال فقط با تأیید نهایی آغاز می‌شود."),
     "rootgrant": ("🔐 مالک ربات: <code>دسترسی روت @username</code> را در همان گروه اجرا کنید؛ "
-                  "کاربر باید همان‌جا مدیر یا مالک باشد. در خصوصی، چت فعال را از فهرست انتخاب کنید."),
+                  "کاربر باید همان‌جا مدیر یا مالک باشد. سپس اختیارات را یکی‌یکی تیک بزنید. "
+                  "در خصوصی، ابتدا چت فعال را از فهرست انتخاب کنید."),
     "rootrevoke": ("🗑 <code>لغو دسترسی روت @username</code> در گروه فقط همان چت را لغو می‌کند؛ "
                    "در خصوصی همهٔ واگذاری‌های آن کاربر لغو می‌شود."),
-    "rootlist": "🔐 <code>فهرست دسترسی‌های روت</code> را فقط در خصوصی ربات اجرا کنید.",
+    "rootlist": "🔐 مالک بات در خصوصی همهٔ واگذاری‌ها را می‌بیند؛ دارندهٔ «مدیریت روت» در گروه فقط واگذاری‌های همان گروه را می‌بیند.",
     "listfilters": "🚫 بنویسید: <code>لیست فیلتر</code>",
     "listnotes": "📒 بنویسید: <code>لیست یادداشت‌ها</code>",
     "listcommands": "⌨️ بنویسید: <code>لیست دستورات</code>",
@@ -1437,41 +1438,55 @@ async def on_owner_broadcast(callback: CallbackQuery, session: AsyncSession, bot
 
 @router.callback_query(F.data.startswith("rt:"))
 async def on_root_access(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
-    """Handle chat picking and owner-only revocation of scoped root grants."""
+    """Owner picker and capability-safe, chat-scoped root grant workflow."""
     import html
 
     from ..config import settings as app_settings
+    from ..db.models import User
     from ..services import owner_access
     from ..keyboards.factory import cb, danger, markup
 
     parts = parse_cb(callback.data or "")
     action = parts[1] if len(parts) > 1 else ""
-    if not app_settings.owner_id or callback.from_user.id != app_settings.owner_id:
-        await safe_answer(callback, "⛔️ فقط مالک ربات می‌تواند این دسترسی را تغییر دهد.",
-                          show_alert=True)
-        return
+    user_id_from_callback = int(callback.from_user.id)
+    is_owner = owner_access.is_bot_owner(user_id_from_callback)
     if action == "noop":
         await safe_answer(callback)
         return
 
-    if action in {"page", "grant", "cancel"}:
+    if action in {"page", "grant", "cancel", "toggle", "save"}:
         if len(parts) < 3 or not parts[2].isdigit():
             await safe_answer(callback)
             return
-        draft_id = int(parts[2])
-        draft = await owner_access.get_root_draft(session, draft_id, callback.from_user.id)
+        draft = await owner_access.get_root_draft(
+            session, int(parts[2]), user_id_from_callback)
         if draft is None:
             await safe_answer(callback, "ℹ️ این درخواست منقضی شده است.", show_alert=True)
             return
+
+        if action in {"page", "grant"} and not is_owner:
+            await safe_answer(callback, "⛔️ فقط مالک بات می‌تواند چت مقصد را انتخاب کند.",
+                              show_alert=True)
+            return
         if action == "cancel":
+            if not is_owner:
+                if callback.message is None or callback.message.chat.type not in {"group", "supergroup"}:
+                    await safe_answer(callback, "⛔️ اجازهٔ لغو این درخواست را ندارید.", show_alert=True)
+                    return
+                if not await owner_access.can_use_root_permission(
+                        bot, session, chat_id=callback.message.chat.id,
+                        user_id=user_id_from_callback, permission="root_manage"):
+                    await safe_answer(callback, "⛔️ اجازهٔ لغو این درخواست را ندارید.", show_alert=True)
+                    return
             await session.delete(draft)
             await session.flush()
             await safe_answer(callback, "درخواست لغو شد.")
             if callback.message is not None:
                 await safe_edit(callback.message, "❌ درخواست دسترسی روت لغو شد.")
             return
-        chats = await owner_access.known_active_chats(session)
+
         if action == "page":
+            chats = await owner_access.known_active_chats(session)
             page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
             page = max(0, page)
             await safe_answer(callback)
@@ -1481,38 +1496,137 @@ async def on_root_access(callback: CallbackQuery, session: AsyncSession, bot: Bo
                     reply_markup=owner_access.root_picker_keyboard(draft, chats, page),
                     parse_mode=ParseMode.HTML)
             return
-        if len(parts) < 4 or not parts[3].lstrip("-").isdigit():
+
+        if action == "grant":
+            if len(parts) < 4 or not parts[3].lstrip("-").isdigit():
+                await safe_answer(callback)
+                return
+            chat_id = int(parts[3])
+            chat = await session.get(Chat, chat_id)
+            if chat is None or not chat.is_active or chat.type not in {"group", "supergroup", "channel"}:
+                await safe_answer(callback, "ℹ️ این چت دیگر فعال یا شناخته‌شده نیست.", show_alert=True)
+                return
+            try:
+                target_id, name, username = await owner_access.resolve_admin_target(
+                    bot, session, chat_id, draft.target_ref)
+            except owner_access.RootAccessError as exc:
+                await safe_answer(callback, str(exc), show_alert=True)
+                return
+            if target_id in {bot.id, user_id_from_callback, app_settings.owner_id}:
+                await safe_answer(callback, "⛔️ ربات، خودتان یا مالک بات را نمی‌توان هدف واگذاری قرار داد.",
+                                  show_alert=True)
+                return
+            user = await session.get(User, target_id)
+            if user is not None:
+                user.first_name = name[:128]
+                user.username = username
+            available = owner_access.permissions_available_for_chat(chat.type)
+            selected = [permission for permission in await owner_access.permissions_for(
+                session, chat_id=chat_id, user_id=target_id) if permission in available]
+            await safe_answer(callback)
+            if callback.message is not None:
+                await safe_edit(
+                    callback.message,
+                    owner_access.root_permission_text(
+                        target_name=name, user_id=target_id, chat=chat,
+                        selected_permissions=selected,
+                        allowed_permissions=available),
+                    reply_markup=owner_access.root_permission_keyboard(
+                        draft, chat_id=chat_id, user_id=target_id,
+                        selected_permissions=selected,
+                        allowed_permissions=available),
+                    parse_mode=ParseMode.HTML)
+            return
+
+        # Toggle/save callback format: rt:<action>:<draft>:<chat>:<target>:<mask>
+        if len(parts) < 6 or not parts[3].lstrip("-").isdigit() or not parts[4].isdigit() or not parts[5].isdigit():
             await safe_answer(callback)
             return
-        chat_id = int(parts[3])
+        chat_id, target_id, mask = int(parts[3]), int(parts[4]), int(parts[5])
         chat = await session.get(Chat, chat_id)
         if chat is None or not chat.is_active or chat.type not in {"group", "supergroup", "channel"}:
             await safe_answer(callback, "ℹ️ این چت دیگر فعال یا شناخته‌شده نیست.", show_alert=True)
             return
+        if not is_owner:
+            if (callback.message is None
+                    or callback.message.chat.type not in {"group", "supergroup"}
+                    or int(callback.message.chat.id) != chat_id):
+                await safe_answer(callback, "⛔️ این واگذاری فقط از همان گروه قابل مدیریت است.",
+                                  show_alert=True)
+                return
+            if not await owner_access.can_use_root_permission(
+                    bot, session, chat_id=chat_id, user_id=user_id_from_callback,
+                    permission="root_manage"):
+                await safe_answer(callback, "⛔️ دسترسی «مدیریت روت» در این گروه ندارید.",
+                                  show_alert=True)
+                return
+            delegated_permissions = await owner_access.permissions_for(
+                session, chat_id=chat_id, user_id=user_id_from_callback)
+            available = owner_access.permissions_available_for_chat(chat.type)
+            allowed = [permission for permission in delegated_permissions
+                       if permission in available]
+        else:
+            allowed = owner_access.permissions_available_for_chat(chat.type)
+        valid_mask = owner_access.permission_mask(allowed)
+        if mask & ~valid_mask:
+            await safe_answer(callback, "⛔️ این اختیار به شما واگذار نشده است.", show_alert=True)
+            return
         try:
-            user_id, name, username = await owner_access.resolve_admin_target(
+            resolved_id, name, username = await owner_access.resolve_admin_target(
                 bot, session, chat_id, draft.target_ref)
         except owner_access.RootAccessError as exc:
             await safe_answer(callback, str(exc), show_alert=True)
             return
+        if resolved_id != target_id:
+            await safe_answer(callback, "⚠️ وضعیت هدف تغییر کرده است؛ درخواست را دوباره آغاز کنید.",
+                              show_alert=True)
+            return
+        if target_id in {bot.id, user_id_from_callback, app_settings.owner_id}:
+            await safe_answer(callback, "⛔️ ربات، خودتان یا مالک بات را نمی‌توان هدف واگذاری قرار داد.",
+                              show_alert=True)
+            return
+        selected = owner_access.permissions_from_mask(
+            mask, allowed_permissions=allowed)
+        if action == "toggle":
+            await safe_answer(callback)
+            if callback.message is not None:
+                await safe_edit(
+                    callback.message,
+                    owner_access.root_permission_text(
+                        target_name=name, user_id=target_id, chat=chat,
+                        selected_permissions=selected,
+                        allowed_permissions=allowed),
+                    reply_markup=owner_access.root_permission_keyboard(
+                        draft, chat_id=chat_id, user_id=target_id,
+                        selected_permissions=selected,
+                        allowed_permissions=allowed),
+                    parse_mode=ParseMode.HTML)
+            return
+        if not selected:
+            await safe_answer(callback, "❌ دست‌کم یک اختیار را تیک بزنید.", show_alert=True)
+            return
         created = await owner_access.grant_root(
-            session, chat_id=chat_id, user_id=user_id, granted_by=callback.from_user.id)
-        user = await session.get(User, user_id)
-        if user is not None:
+            session, chat_id=chat_id, user_id=target_id,
+            granted_by=user_id_from_callback, permissions=selected)
+        user = await session.get(User, target_id)
+        if user is None:
+            user = User(id=target_id, first_name=name[:128], username=username)
+            session.add(user)
+        else:
             user.first_name = name[:128]
             user.username = username
         await session.delete(draft)
         await session.flush()
-        await safe_answer(callback, "✅ دسترسی محدود ثبت شد." if created else "ℹ️ از قبل ثبت شده بود.")
+        await safe_answer(callback, "✅ اختیارات ذخیره شد." if created else "✅ اختیارات به‌روزرسانی شد.")
         if callback.message is not None:
             message_text = (
-                f"{'✅ دسترسی روت فعال شد' if created else 'ℹ️ دسترسی روت از قبل فعال بود'}\n\n"
-                f"👤 کاربر: {html.escape(name)} (<code>{user_id}</code>)\n"
+                f"✅ اختیارات روت برای {html.escape(name)} ذخیره شد.\n\n"
                 f"💬 چت: {html.escape(chat.title or str(chat.id))}\n"
-                "🔐 فقط همین چت به محدودهٔ دسترسی اضافه شد؛ عملیات سراسری به او داده نمی‌شود.")
+                f"🔑 {html.escape(owner_access.selected_permissions_text(selected))}\n\n"
+                "🔒 گرنت به همین چت محدود است؛ اثر بن/سکوت سراسری در گروه‌های واجد شرایط اعمال می‌شود.")
             await safe_edit(
                 callback.message, message_text,
-                reply_markup=markup([[danger("لغو همین دسترسی", cb("rt", "revoke", chat_id, user_id))]]),
+                reply_markup=markup([[danger("لغو همین دسترسی", cb("rt", "revoke", chat_id, target_id))]]),
                 parse_mode=ParseMode.HTML)
         return
 
@@ -1520,8 +1634,19 @@ async def on_root_access(callback: CallbackQuery, session: AsyncSession, bot: Bo
         if len(parts) < 4 or not parts[2].lstrip("-").isdigit() or not parts[3].isdigit():
             await safe_answer(callback)
             return
-        chat_id, user_id = int(parts[2]), int(parts[3])
-        removed = await owner_access.revoke_root(session, chat_id=chat_id, user_id=user_id)
+        chat_id, target_id = int(parts[2]), int(parts[3])
+        if not is_owner:
+            if (callback.message is None
+                    or callback.message.chat.type not in {"group", "supergroup"}
+                    or int(callback.message.chat.id) != chat_id
+                    or not await owner_access.can_use_root_permission(
+                        bot, session, chat_id=chat_id, user_id=user_id_from_callback,
+                        permission="root_manage")):
+                await safe_answer(callback, "⛔️ فقط مالک یا دارندهٔ اختیار مدیریت روت در همین گروه می‌تواند لغو کند.",
+                                  show_alert=True)
+                return
+        removed = await owner_access.revoke_root(
+            session, chat_id=chat_id, user_id=target_id)
         await safe_answer(callback, "🗑 دسترسی لغو شد." if removed else "ℹ️ دسترسی از قبل برداشته شده بود.")
         if callback.message is None:
             return
@@ -1538,7 +1663,9 @@ async def on_root_access(callback: CallbackQuery, session: AsyncSession, bot: Bo
             member_name = (f"{user.first_name or ''} {user.last_name or ''}".strip()
                            or (f"@{user.username}" if user.username else str(user.id)))
             chat_name = chat.title or (f"@{chat.username}" if chat.username else str(chat.id))
-            lines.append(f"• {html.escape(member_name)} — {html.escape(chat_name)}")
+            labels = owner_access.selected_permissions_text(grant.permissions)
+            lines.append(f"• {html.escape(member_name)} — {html.escape(chat_name)}\n"
+                         f"   🔑 {html.escape(labels)}")
             buttons.append([danger(
                 f"🗑 {member_name[:18]} · {chat_name[:18]}",
                 cb("rt", "revoke", chat.id, grant.user_id))])

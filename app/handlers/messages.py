@@ -33,6 +33,7 @@ from ..services import (
     entertainment,
     filters as filter_service,
     gban as gban_service,
+    global_mute as global_mute_service,
     locks as lock_service,
     moderation as mod,
     permissions,
@@ -106,6 +107,18 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
                 bot, session, chat_id=chat.id, chat_title=chat.title or "",
                 user_id=user.id, user_name=user.full_name or "", reason=gb_reason,
                 message_id=message.message_id, clean=True)
+            return
+
+    # A global mute is persistent and enforced independently of group settings.
+    # It is applied only in registered groups where the bot owner is currently
+    # an admin/creator and the bot itself can restrict members.
+    global_mute_reason = await global_mute_service.is_muted(session, user.id)
+    if global_mute_reason is not None:
+        enforced = await global_mute_service.enforce(
+            bot, session, chat_id=chat.id, user_id=user.id,
+            user_name=user.full_name or "", reason=global_mute_reason,
+            message_id=message.message_id)
+        if enforced:
             return
 
     actor = await permissions.build_actor(bot, chat.id, user.id, session=session)

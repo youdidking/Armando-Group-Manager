@@ -187,6 +187,16 @@ def _is_owner(user_id: int) -> bool:
     return bool(app_settings.owner_id) and user_id == app_settings.owner_id
 
 
+async def _may_manage_approval(ctx: CommandContext) -> bool:
+    if ctx.message.chat.type not in {"group", "supergroup"}:
+        return False
+    from ..services import owner_access
+
+    return await owner_access.can_use_root_permission(
+        ctx.bot, ctx.session, chat_id=ctx.chat_id, user_id=ctx.user_id,
+        permission="approval_manage")
+
+
 async def cmd_approve_group(bot: Bot, session: AsyncSession, chat_id: int,
                             target: int, approve: bool) -> str:
     if not _is_owner(chat_id):
@@ -208,13 +218,20 @@ def _owner_only_message() -> str:
          description="تایید دسترسی یک گروه (مالک ربات)",
          usage="تایید گروه -1001234567890", allow_in_private=True)
 async def cmd_approve(ctx: CommandContext) -> None:
-    if not ctx.actor.is_bot_owner:
+    is_owner = ctx.actor.is_bot_owner
+    if not is_owner and not await _may_manage_approval(ctx):
         await ctx.reply(_owner_only_message())
         return
-    target = _parse_chat_id(ctx.arg_text)
-    if target is None:
-        await ctx.reply("⚠️ قالب: <code>تایید گروه -1001234567890</code>")
-        return
+    if is_owner:
+        target = _parse_chat_id(ctx.arg_text)
+        if target is None:
+            await ctx.reply("⚠️ قالب: <code>تایید گروه -1001234567890</code>")
+            return
+    else:
+        target = ctx.chat_id
+        if ctx.arg_text and _parse_chat_id(ctx.arg_text) != target:
+            await ctx.reply("⛔️ اختیار واگذارشده فقط اجازهٔ تایید همین گروه را می‌دهد.")
+            return
     await ctx.reply(await _resolve(ctx.bot, ctx.session, target, True, ctx.user_id))
 
 
@@ -222,20 +239,27 @@ async def cmd_approve(ctx: CommandContext) -> None:
          description="رد درخواست یک گروه و خروج ربات",
          usage="رد گروه -1001234567890", allow_in_private=True)
 async def cmd_reject(ctx: CommandContext) -> None:
-    if not ctx.actor.is_bot_owner:
+    is_owner = ctx.actor.is_bot_owner
+    if not is_owner and not await _may_manage_approval(ctx):
         await ctx.reply(_owner_only_message())
         return
-    target = _parse_chat_id(ctx.arg_text)
-    if target is None:
-        await ctx.reply("⚠️ قالب: <code>رد گروه -1001234567890</code>")
-        return
+    if is_owner:
+        target = _parse_chat_id(ctx.arg_text)
+        if target is None:
+            await ctx.reply("⚠️ قالب: <code>رد گروه -1001234567890</code>")
+            return
+    else:
+        target = ctx.chat_id
+        if ctx.arg_text and _parse_chat_id(ctx.arg_text) != target:
+            await ctx.reply("⛔️ اختیار واگذارشده فقط اجازهٔ رد و خروج ربات از همین گروه را می‌دهد.")
+            return
     await ctx.reply(await _resolve(ctx.bot, ctx.session, target, False, ctx.user_id))
 
 
 @command("وضعیت تایید", role="founder", category="owner",
          description="نمایش وضعیت دروازهٔ تایید گروه‌ها", allow_in_private=True)
 async def cmd_approval_status(ctx: CommandContext) -> None:
-    if not ctx.actor.is_bot_owner:
+    if not ctx.actor.is_bot_owner and not await _may_manage_approval(ctx):
         await ctx.reply(_owner_only_message())
         return
     state = "🟢 روشن" if app_settings.require_group_approval else "🔴 خاموش"

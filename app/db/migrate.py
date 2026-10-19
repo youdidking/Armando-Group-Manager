@@ -89,6 +89,15 @@ async def _migration_8(engine: AsyncEngine) -> None:
 
 MIGRATIONS[8] = _migration_8
 
+
+async def _migration_9(engine: AsyncEngine) -> None:
+    """Store the selected capabilities on each scoped root grant."""
+    await add_column(engine, "bot_root_grants", "permissions",
+                     "JSON NOT NULL DEFAULT '[\"broadcast\"]'")
+
+
+MIGRATIONS[9] = _migration_9
+
 CURRENT_VERSION = max(MIGRATIONS) if MIGRATIONS else 0
 
 

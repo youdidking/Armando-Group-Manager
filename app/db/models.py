@@ -23,6 +23,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -703,7 +704,35 @@ class BotRootGrant(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"),
                                          nullable=False)
     granted_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Legacy grants retain the existing broadcast-only behavior. New grants
+    # are chosen explicitly from the bot-owner's capability menu.
+    permissions: Mapped[list[str]] = mapped_column(
+        JSON, default=lambda: ["broadcast"], nullable=False,
+        server_default=text("'[\"broadcast\"]'"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class GlobalMute(Base):
+    """Persistent global mute plus per-chat restrictions created by it.
+
+    The saved chat ids and prior permissions let global-unmute restore only
+    restrictions this feature changed, without lifting a local admin's mute.
+    """
+
+    __tablename__ = "global_mutes"
+    __table_args__ = (Index("ix_global_mutes_active", "active"),)
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    muted_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, default="بدون دلیل", nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False,
+                                         server_default=TRUE)
+    applied_chat_ids: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
+    previous_permissions: Mapped[dict[str, dict] | None] = mapped_column(
+        JSON, default=dict, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                 nullable=False)
 
 
 class RootGrantDraft(Base):
@@ -734,5 +763,5 @@ ALL_MODELS: tuple[type[Base], ...] = (
     ReactionRule, CaptchaSession, Report, ScheduledMessage, Federation,
     FederationAdmin, FederationMember, Connection, UserActivity,
     GroupStatSnapshot, AuditLog, BanRecord, BotSettings, BroadcastDraft,
-    BotRootGrant, RootGrantDraft, SchemaVersion,
+    BotRootGrant, GlobalMute, RootGrantDraft, SchemaVersion,
 )
