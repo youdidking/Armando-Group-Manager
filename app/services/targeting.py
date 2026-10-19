@@ -19,7 +19,7 @@ logger = logging.getLogger("armando.targeting")
 
 # A username always contains a letter or an underscore - otherwise the token is
 # a numeric user id and must not be looked up as a username.
-USERNAME_RE = re.compile(r"^@?(?=[A-Za-z0-9_]*[A-Za-z_])([A-Za-z0-9_]{4,32})$")
+USERNAME_RE = re.compile(r"^@?([A-Za-z][A-Za-z0-9_]{4,31})$")
 ID_RE = re.compile(r"^\d{5,15}$")
 
 

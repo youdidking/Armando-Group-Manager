@@ -148,6 +148,30 @@ async def safe_delete(bot, chat_id: int, message_id: int, context: str = "") -> 
     return bool(result)
 
 
+_DELETE_TASKS: set[asyncio.Task] = set()
+
+
+def schedule_delete(bot, chat_id: int, message_id: int, delay: int,
+                    context: str = "auto_delete") -> asyncio.Task | None:
+    """Schedule safe deletion of one bot message; a delay of zero disables it."""
+    try:
+        seconds = int(delay)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0 or not message_id:
+        return None
+    seconds = min(seconds, 3600)
+
+    async def _delete_later() -> None:
+        await asyncio.sleep(seconds)
+        await safe_delete(bot, chat_id, message_id, context=context)
+
+    task = asyncio.create_task(_delete_later())
+    _DELETE_TASKS.add(task)
+    task.add_done_callback(_DELETE_TASKS.discard)
+    return task
+
+
 async def safe_send(bot, chat_id: int, text: str, **kwargs):
     return await safe_call(lambda: bot.send_message(chat_id=chat_id, text=text, **kwargs),
                            context="send_message")

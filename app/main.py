@@ -23,6 +23,7 @@ from .handlers import build_routers
 from .logging_setup import setup_logging
 from .middlewares import (ChatTrackingMiddleware, DbSessionMiddleware,
                          GroupApprovalMiddleware, ThrottlingMiddleware)
+from .services.broadcast import MediaGroupCacheMiddleware
 from .services.market import close_http_session
 from .services.scheduler import start_scheduler, stop_scheduler
 
@@ -46,6 +47,7 @@ def build_dispatcher() -> Dispatcher:
     dispatcher.update.outer_middleware(GroupApprovalMiddleware())
     dispatcher.update.outer_middleware(DbSessionMiddleware())
     dispatcher.update.outer_middleware(ThrottlingMiddleware())
+    dispatcher.message.outer_middleware(MediaGroupCacheMiddleware())
     dispatcher.message.middleware(ChatTrackingMiddleware())
     dispatcher.callback_query.middleware(ChatTrackingMiddleware())
 
@@ -117,6 +119,11 @@ async def run() -> None:
     setup_logging()
     logger.info(BANNER)
     logger.info("environment=%s timezone=%s", settings.environment, settings.timezone)
+    from . import config as app_config
+
+    if app_config.settings.ai_chat_enabled and app_config.settings.gemini_api_key:
+        logger.warning("گفت‌وگوی Gemini فعال است؛ متن پرسش‌ها برای Google ارسال می‌شود و داده‌های Free Tier "
+                       "ممکن است برای بهبود محصولات Google استفاده شوند.")
 
     await init_db()
 

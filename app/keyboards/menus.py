@@ -562,7 +562,7 @@ def _panel_night(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
 
 def _panel_messages(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     settings = ctx["settings"]
-    text = "\n".join([
+    text_lines = [
         "📌 <b>مدیریت پیام‌ها</b>",
         "",
         "دستورها:",
@@ -570,16 +570,27 @@ def _panel_messages(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         "• <code>حذف پین</code> • <code>پین فعلی</code> • <code>حذف همه پین‌ها</code>",
         "• <code>پاکسازی ۱۰۰</code> • <code>پاکسازی</code> (از پیام ریپلایی تا حالا)",
         "• <code>قوانین</code> • <code>تنظیم قوانین متن...</code> • <code>حذف قوانین</code>",
-    ])
-    keyboard = markup([
+    ]
+    rows = [
         [primary("📌 پین", cb("cmd", "pin")), primary("📍 حذف پین", cb("cmd", "unpin")),
          primary("📌 پین فعلی", cb("cmd", "getpin"))],
         [primary("📜 مشاهده قوانین", cb("cmd", "rules")), primary("✏️ ویرایش قوانین", cb("cmd", "setrules"))],
         [primary("🧹 پاکسازی ۱۰۰", cb("cmd", "purge100")), danger("🧹 حذف همه پین‌ها", cb("conf", "unpinall", "all"))],
         [primary("📜 قوانین", cb("panel", "rules"))],
-        row(home()),
-    ])
-    return text, keyboard
+    ]
+    if int(ctx.get("level", 0)) >= level_of("admin"):
+        raw_delay = settings.get("report_delete_after")
+        delay = 12 if raw_delay is None else int(raw_delay)
+        text_lines.extend([
+            "",
+            f"⏱ حذف خودکار گزارش‌های پایان ارسال همگانی و اسکن حساب‌های حذف‌شده: "
+            f"{to_persian_digits(str(delay))} ثانیه (۰ = خاموش).",
+            "این مقدار فقط برای همین گروه است.",
+        ])
+        rows.append(number_buttons("ثانیه", "report_delete_after", delay, "messages",
+                                   step=1, minimum=0, maximum=600))
+    rows.append(row(home()))
+    return "\n".join(text_lines), markup(rows)
 
 
 def _panel_rules(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
@@ -676,10 +687,13 @@ def admin_rights_keyboard(user_id: int, rights: dict) -> InlineKeyboardMarkup:
 
 def _panel_members(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     counts = ctx.get("member_counts") or {}
+    admins = counts.get("admins")
+    admin_count_text = (to_persian_digits(str(admins)) if admins is not None
+                        else "نامشخص")
     text = "\n".join([
         "👥 <b>اعضا و مدیران</b>",
         "",
-        f"👮 مدیران تلگرام: {to_persian_digits(str(counts.get('admins', 0)))}",
+        f"👮 مدیران تلگرام: {admin_count_text}",
         f"🛡 کادر ربات: {to_persian_digits(str(counts.get('staff', 0)))}",
         f"⭐️ کاربران ویژه: {to_persian_digits(str(counts.get('trusted', 0)))}",
         f"🏷 تگ‌دارها: {to_persian_digits(str(counts.get('tags', 0)))}",
@@ -811,13 +825,17 @@ def _panel_tags(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     lines += ["",
               "دستورها:",
               "• <code>تگ متن تگ</code> (با ریپلای روی پیام کاربر)",
-              "• <code>حذف تگ</code> • <code>لیست تگ‌ها</code>",
-              "• <code>تگ من متن تگ</code> (اگر توسط مدیر فعال شود)", "",
+              "• <code>حذف تگ</code> فقط تگ نمایشی را پاک می‌کند.",
+              "• <code>حذف از تگ</code> استثنای جداگانه برای «تگ همه» است؛ با ریپلای، خود مدیر و عضو هدف مستثنا می‌شوند.",
+              "• <code>افزودن به تگ</code> استثنا را برمی‌دارد؛ برای خودتان: <code>افزودن به تگ خود</code>.",
+              "• <code>لیست تگ‌ها</code> • <code>تگ من متن تگ</code> (اگر توسط مدیر فعال شود)", "",
               "ℹ️ برای درج تگ در «لیست اعضای تلگرام» ربات باید دسترسی "
               "«مدیریت تگ اعضا» داشته باشد."]
     keyboard = markup([
         [primary("📋 لیست تگ‌ها", cb("cmd", "taglist")), primary("🏷 تغییر تگ", cb("cmd", "settag"))],
-        [primary("🗑 حذف تگ", cb("cmd", "deltag"))],
+        [primary("🗑 حذف تگ نمایشی", cb("cmd", "deltag"))],
+        [primary("🚫 حذف از تگ همه", cb("cmd", "tagexclude")),
+         success("✅ افزودن به تگ همه", cb("cmd", "tagrestore"))],
         row(home()),
     ])
     return "\n".join(lines), keyboard
@@ -968,10 +986,9 @@ def _panel_profile(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     if profile.get("tag"):
         lines.append(f"🏷 تگ: <code>{profile['tag']}</code>")
     lines.append(f"📨 پیام‌های من: {to_persian_digits(str(profile.get('messages', 0)))}")
-    lines.append(f"⭐️ امتیاز من: {to_persian_digits(str(profile.get('score', 0)))}")
     lines.append(f"⚠️ اخطارهای من: {to_persian_digits(str(profile.get('warns', 0)))}")
     keyboard = markup([
-        [primary("ℹ️ اطلاعات من", cb("cmd", "me")), primary("⭐️ امتیاز من", cb("cmd", "myrep"))],
+        [primary("ℹ️ اطلاعات من", cb("cmd", "me"))],
         [primary("📜 قوانین گروه", cb("cmd", "rules")), primary("📊 آمار گروه", cb("cmd", "stats"))],
         [primary("💤 وضعیت AFK", cb("cmd", "afkhelp")), primary("📚 راهنما", cb("panel", "help"))],
         row(home()),
@@ -1025,10 +1042,11 @@ def help_text(topic: str) -> str:
     topics = {
         "mod": "\n".join([
             "🛡 <b>مدیریت کاربران</b>", "",
-            "• <code>بن</code> / <code>بن ۲روز دلیل</code> / <code>رفع بن</code>",
-            "• با ریپلای، یا با نام‌کاربری/شناسه: <code>لغو سکوت @username</code>",
-            "• <code>کیک</code> / <code>سکوت</code> / <code>سکوت ۳۰دقیقه</code> / <code>لغو سکوت</code>",
-            "• <code>اخطار دلیل</code> / <code>کسر اخطار</code> / <code>صفر کردن اخطار</code>",
+            "• روی پیام هدف ریپلای کنید، یا شناسه/نام‌کاربری مشخص بدهید: <code>بن @username</code> / <code>بن @username ۲روز تبلیغ</code>",
+            "• <code>رفع بن @username</code> • <code>کیک @username</code> • <code>سکوت @username ۳۰دقیقه</code>",
+            "• با ریپلای می‌توانید دلیل کوتاه هم بنویسید: <code>اخطار تبلیغ</code> / <code>بن تبلیغ</code>",
+            "• <code>لغو سکوت</code> / <code>کسر اخطار</code> / <code>صفر کردن اخطار</code>",
+            "• فقط فرمان دقیق با هدف معتبر اجرا می‌شود؛ جمله‌هایی مثل «بن ات می‌کنم» فرمان نیستند.",
             "• <code>تعداد اخطار ۴</code> / <code>وضعیت اخطار</code> / <code>تاریخچه</code>",
             "• <code>لیست بن</code> / <code>لیست سکوت</code> / <code>اطلاعات کاربر</code>",
         ]),
@@ -1039,7 +1057,10 @@ def help_text(topic: str) -> str:
             "• <code>قفل فحاشی</code> / <code>قفل پورن</code> / <code>قفل انگلیسی</code>",
             "• <code>قفل چینی</code> / <code>قفل روسی</code> / <code>قفل هندی</code>",
             "• <code>قفل طولانی</code> (پیامِ بیش از ۱۰۰۰ کاراکتر → حذف + سکوت)",
-            "• <code>قفل کانال</code> (ارسال ناشناس با کانال → حذف + مسدود کردن کانال)",
+            "• <code>قفل ناشناس</code> (ارسال با نام کانال دیگر → حذف/مسدودسازی کانال)",
+            "• پیام با نام همین گروه پیش‌فرض از این قفل معاف است؛ سازنده می‌تواند با "
+            "<code>استثنای ناشناس خاموش</code> این معافیت را بردارد.",
+            "• تلگرام هویت انسانیِ مدیر ناشناس را به ربات نشان نمی‌دهد.",
             "• <code>قفل گروه</code> / <code>قفل گروه رسانه</code> / <code>باز کردن گروه</code>",
             "• <code>قفل خروج</code> (بن خودکار هرکس خارج شود)",
             "• <code>بن خروج سریع ۱۰</code> (بنِ خروجِ بلافاصله پس از ورود)",
@@ -1078,14 +1099,15 @@ def help_text(topic: str) -> str:
             "📊 <b>آمار</b>", "",
             "• <code>آمار</code> — آمار کلی گروه",
             "• <code>فعال‌ترین‌ها ۱۰</code> / <code>غیرفعال‌ها ۳۰</code>",
-            "• <code>آمار من</code> / <code>رتبه من</code>",
+            "• <code>آمار من</code>",
             "• ℹ️ آمار از زمان حضور ربات جمع‌آوری می‌شود.",
         ]),
         "messages": "\n".join([
             "📌 <b>پیام‌ها</b>", "",
             "• <code>پین</code> (با ریپلای) / <code>لغو پین</code> / <code>لغو همه پین‌ها</code>",
             "• <code>پاکسازی ۱۰۰</code> / <code>سنجاق لیست</code>",
-            "• <code>زمان‌بندی ۲۴ساعت متن پیام</code>",
+            "• <code>زمان‌بندی ۲۴ساعت متن پیام</code> / <code>لیست زمان‌بندی</code>",
+            "• <code>حذف زمان‌بندی ۱</code> — حذف زمان‌بندی با شناسهٔ فهرست",
         ]),
         "members": "\n".join([
             "👥 <b>اعضا</b>", "",
@@ -1093,7 +1115,9 @@ def help_text(topic: str) -> str:
             "• <code>تگ مدیر فروش</code> / <code>حذف تگ</code> / <code>لیست تگ‌ها</code>",
             "• <code>افزودن ناظر</code> / <code>عزل ناظر</code> (با ریپلای)",
             "• <code>لیست مدیران</code> / <code>معافیت‌ها</code>",
-            "• <code>تگ همه</code> (منشن کردن همه اعضا در یک پیام)",
+            "• <code>تگ همه</code> (منشن اعضای شناخته‌شده در پیام‌های دسته‌ای؛ با ریپلای به همان پیام)",
+            "• <code>حذف از تگ</code> (استثنای جدا از تگ نمایشی؛ با ریپلای، خود مدیر و عضو هدف مستثنا می‌شوند)",
+            "• <code>افزودن به تگ</code> برای برداشتن استثنا؛ برای خودتان <code>افزودن به تگ خود</code>",
         ]),
         "notes": "\n".join([
             "🗒 <b>یادداشت‌ها و دستورات شخصی</b>", "",
@@ -1119,13 +1143,24 @@ def help_text(topic: str) -> str:
             "• <code>ارتقا کامل</code> (ارتقا با همهٔ دسترسی‌ها)",
             "• <code>افزودن ناظر</code> / <code>افزودن مدیر</code> / <code>عزل ناظر</code>",
             "• <code>لیست مدیران</code> / <code>معافیت‌ها</code>",
-            "• <code>تگ همه</code> (منشن کردن همه اعضا در یک پیام)",
+            "• <code>تگ همه</code> (منشن اعضای شناخته‌شده در پیام‌های دسته‌ای؛ با ریپلای به همان پیام)",
         ]),
         "tools": "\n".join([
             "🛠 <b>ابزارها</b>", "",
             "• <code>ساخت لینک</code> / <code>لینک گروه</code>",
             "• <code>تنظیم عنوان نام جدید</code> / <code>تنظیم توضیحات متن</code>",
             "• <code>بکاپ</code> / <code>آیدی</code> / <code>تاریخ</code> / <code>ساعت</code>",
+            "• ارسال پیوند مستقلِ پست/ریل عمومی اینستاگرام برای دریافت رسانه.",
+            "• <code>آرماندو بگو پرسش</code> — گفت‌وگوی Gemini، در صورت فعال‌سازی مالک ربات.",
+        ]),
+        "owner": "\n".join([
+            "🌍 <b>دستورهای مالک ربات</b>", "",
+            "• <code>ارسال همگانی</code> در خصوصی ربات: متن را در گیومه بفرستید یا روی پیام ریپلای کنید، مقصدهای فعالِ شناخته‌شده را انتخاب کنید و پیش از ارسال مرور/تأیید کنید.",
+            "• رابط برنامه‌نویسی ربات تلگرام (Bot API) فهرست کامل چت‌ها را نمی‌دهد؛ انتخاب فقط از چت‌های فعالِ ثبت‌شده در پایگاه داده است.",
+            "• <code>دسترسی روت @username</code> در گروه: فقط اگر همان کاربر همین‌جا مدیر/مالک است؛ در خصوصی، چت مجاز را انتخاب کنید.",
+            "• <code>لغو دسترسی روت @username</code> در گروه فقط همان چت را لغو می‌کند؛ در خصوصی همهٔ واگذاری‌های همان کاربر لغو می‌شود.",
+            "• <code>فهرست دسترسی‌های روت</code> فقط در خصوصی نمایش داده می‌شود.",
+            "• روت فقط در چت واگذارشده و پس از بررسی مجدد مدیر بودن می‌تواند ارسال همگانی کند؛ هیچ دسترسی یا بن سراسری داده نمی‌شود.",
         ]),
         "market": "\n".join([
             "💱 <b>ارز، طلا و بورس</b>", "",

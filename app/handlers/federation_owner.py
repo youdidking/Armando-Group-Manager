@@ -369,31 +369,224 @@ async def cmd_global_ban_list(ctx: CommandContext) -> None:
     await ctx.reply("\n".join(lines))
 
 
-@command("ارسال همگانی", "همگانی", role="founder", category="owner",
-         description="ارسال پیام به همه گروه‌ها (مالک ربات)", allow_in_private=True)
-async def cmd_broadcast(ctx: CommandContext) -> None:
+@command("دسترسی روت", role="founder", category="owner",
+         description="اعطای دسترسی روت محدود به یک گروه/کانال",
+         usage="دسترسی روت @username یا شناسه", allow_in_private=True)
+async def cmd_root_grant(ctx: CommandContext) -> None:
     if not ctx.actor.is_bot_owner:
         return
-    text = ctx.arg_text.strip()
-    if not text and ctx.message.reply_to_message:
-        text = ctx.message.reply_to_message.text or ctx.message.reply_to_message.caption or ""
-    if not text:
-        await ctx.reply("⚠️ متن پیام را بنویسید: <code>ارسال همگانی متن شما</code>")
-        return
-    result = await ctx.session.execute(select(Chat.id).where(Chat.is_active.is_(True)))
-    chat_ids = [row[0] for row in result.all()]
-    sent, failed = 0, 0
-    from ..core.errors import safe_send
 
-    for chat_id in chat_ids:
-        message = await safe_send(ctx.bot, chat_id, f"📢 <b>اطلاعیه</b>\n\n{text}",
-                                  parse_mode="HTML")
-        if message is None:
-            failed += 1
+    from ..services import owner_access
+    from ..keyboards.factory import cb, danger, markup, success
+
+    if ctx.message.chat.type == "private":
+        if ctx.message.reply_to_message and ctx.message.reply_to_message.from_user:
+            target_ref = str(ctx.message.reply_to_message.from_user.id)
+        elif len(ctx.args) == 1:
+            target_ref = ctx.args[0]
         else:
-            sent += 1
-    await ctx.reply(f"📢 ارسال همگانی انجام شد.\n✅ موفق: {to_persian_digits(str(sent))}\n"
-                    f"⚠️ ناموفق: {to_persian_digits(str(failed))}")
+            await ctx.reply("⚠️ شناسهٔ عددی یا نام‌کاربری هدف را بدهید.\n"
+                            "نمونه: <code>دسترسی روت @username</code>")
+            return
+        chats = await owner_access.known_active_chats(ctx.session)
+        if not chats:
+            await ctx.reply("ℹ️ چت فعال و شناخته‌شده‌ای برای انتخاب ثبت نشده است.")
+            return
+        try:
+            draft = await owner_access.create_root_draft(
+                ctx.session, owner_id=ctx.user_id, target_ref=target_ref)
+        except owner_access.RootAccessError as exc:
+            await ctx.reply(str(exc))
+            return
+        keyboard = owner_access.root_picker_keyboard(draft, chats, 0)
+        await ctx.reply(owner_access.root_picker_text(draft, chats, 0), reply_markup=keyboard)
+        return
+
+    if ctx.message.chat.type not in {"group", "supergroup"}:
+        await ctx.reply("⚠️ برای انتخاب کانال، این دستور را در خصوصی ربات اجرا کنید.")
+        return
+    target = await ctx.target()
+    if target.error or not target.user_id:
+        await ctx.reply(target.error or "❌ کاربر هدف مشخص نشد.")
+        return
+    if target.user_id == ctx.bot.id:
+        await ctx.reply("⛔️ خود ربات نمی‌تواند هدف دسترسی روت باشد.")
+        return
+    try:
+        user_id, name, username = await owner_access.resolve_admin_target(
+            ctx.bot, ctx.session, ctx.chat_id, str(target.user_id))
+    except owner_access.RootAccessError as exc:
+        await ctx.reply(str(exc))
+        return
+    created = await owner_access.grant_root(
+        ctx.session, chat_id=ctx.chat_id, user_id=user_id, granted_by=ctx.user_id)
+    db_user = await ctx.session.get(User, user_id)
+    if db_user is not None:
+        db_user.first_name = target.first_name or name
+        db_user.last_name = target.last_name
+        db_user.username = username or target.username
+    if not created:
+        await ctx.reply(f"ℹ️ {user_html(user_id, name)} از قبل در این چت دسترسی روت دارد.")
+        return
+    await ctx.reply(
+        f"✅ دسترسی روت برای {user_html(user_id, name)} در همین چت فعال شد.\n"
+        "🔐 دسترسی فقط به چت‌های مجازش محدود است؛ این کار دسترسی مدیریتی تلگرام، "
+        "بن سراسری یا دسترسی به چت‌های دیگر نمی‌دهد.",
+        reply_markup=markup([[danger("لغو همین دسترسی", cb("rt", "revoke", ctx.chat_id, user_id))]]))
+
+
+@command("لغو دسترسی روت", role="founder", category="owner",
+         description="لغو دسترسی روت محدود به چت",
+         usage="لغو دسترسی روت @username یا شناسه", allow_in_private=True)
+async def cmd_root_revoke(ctx: CommandContext) -> None:
+    if not ctx.actor.is_bot_owner:
+        return
+    from ..services import owner_access
+    from ..core.normalization import normalize_digits
+    from sqlalchemy import func
+
+    if ctx.message.chat.type == "private":
+        if ctx.message.reply_to_message and ctx.message.reply_to_message.from_user:
+            user_id = int(ctx.message.reply_to_message.from_user.id)
+        elif len(ctx.args) == 1:
+            ref = ctx.args[0]
+            normalized = normalize_digits(ref, to="ascii")
+            if normalized.isdigit():
+                user_id = int(normalized)
+            else:
+                username = ref.lstrip("@").lower()
+                user = (await ctx.session.execute(
+                    select(User).where(func.lower(User.username) == username).limit(1)
+                )).scalars().first()
+                if user is None:
+                    await ctx.reply("❌ نام‌کاربری در کاربران شناخته‌شده نیست؛ "
+                                    "از «فهرست دسترسی‌های روت» استفاده کنید.")
+                    return
+                user_id = int(user.id)
+        else:
+            await ctx.reply("⚠️ شناسه یا نام‌کاربری را بدهید؛ این فرمان در خصوصی همهٔ دسترسی‌های آن کاربر را لغو می‌کند.")
+            return
+        count = await owner_access.revoke_root_everywhere(ctx.session, user_id=user_id)
+        await ctx.reply(f"🗑 {to_persian_digits(str(count))} دسترسی روت برای "
+                        f"<code>{user_id}</code> لغو شد.")
+        return
+
+    target = await ctx.target()
+    if target.error or not target.user_id:
+        await ctx.reply(target.error or "❌ کاربر هدف مشخص نشد.")
+        return
+    removed = await owner_access.revoke_root(
+        ctx.session, chat_id=ctx.chat_id, user_id=target.user_id)
+    await ctx.reply("🗑 دسترسی روت این کاربر در همین چت لغو شد."
+                    if removed else "ℹ️ این کاربر در همین چت دسترسی روت نداشت.")
+
+
+@command("فهرست دسترسی‌های روت", "دسترسی‌های روت", role="founder",
+         category="owner", description="نمایش دسترسی‌های روت",
+         allow_in_private=True)
+async def cmd_root_list(ctx: CommandContext) -> None:
+    if not ctx.actor.is_bot_owner:
+        return
+    if ctx.message.chat.type != "private":
+        await ctx.reply("ℹ️ این فهرست فقط در خصوصی ربات نمایش داده می‌شود.")
+        return
+    from ..services import owner_access
+    from ..keyboards.factory import danger, markup
+    import html
+
+    grants = await owner_access.list_root_grants(ctx.session)
+    if not grants:
+        await ctx.reply("✅ هیچ دسترسی روتی ثبت نشده است.")
+        return
+    lines = ["🔐 <b>دسترسی‌های روت</b>", ""]
+    buttons = []
+    for grant, chat, user in grants[:50]:
+        member_name = (f"{user.first_name or ''} {user.last_name or ''}".strip()
+                       or (f"@{user.username}" if user.username else str(user.id)))
+        chat_name = chat.title or (f"@{chat.username}" if chat.username else str(chat.id))
+        lines.append(f"• {html.escape(member_name)} — {html.escape(chat_name)}")
+        buttons.append([danger(
+            f"🗑 {member_name[:18]} · {chat_name[:18]}",
+            cb("rt", "revoke", chat.id, grant.user_id))])
+    if len(grants) > 50:
+        lines.append(f"\n… {to_persian_digits(str(len(grants) - 50))} مورد دیگر در فهرست هست.")
+    await ctx.reply("\n".join(lines), reply_markup=markup(buttons))
+
+
+@command("ارسال همگانی", "همگانی", role="founder", category="owner",
+         description="ارسال انتخابی به گروه‌ها و کانال‌های فعال",
+         usage="ارسال همگانی «متن» یا پاسخ به پیام", allow_in_private=True)
+async def cmd_broadcast(ctx: CommandContext) -> None:
+    from ..services import broadcast as broadcast_service, owner_access, owner_broadcast
+    from ..keyboards.factory import success, danger, markup
+
+    user_id = ctx.user_id
+    is_owner = owner_broadcast.is_bot_owner(user_id)
+    delegated = not is_owner
+    message_chat_type = ctx.message.chat.type
+    chats = await owner_broadcast.effective_chats(
+        ctx.session, user_id, message_chat_id=ctx.chat_id,
+        message_chat_type=message_chat_type)
+    if message_chat_type in {"group", "supergroup"}:
+        if not chats:
+            await ctx.reply("⛔️ در این چت دسترسی ارسال ندارید. در گروه، عملیات فقط همان‌جا انجام می‌شود؛ "
+                            "در خصوصی، مقصدهای مجاز را انتخاب کنید.")
+            return
+        if delegated and not await owner_access.is_current_admin_or_creator(
+                ctx.bot, ctx.chat_id, user_id):
+            await ctx.reply("⛔️ دسترسی روت در این چت نیازمند مدیر/مالک بودن فعلی شماست.")
+            return
+    elif message_chat_type != "private":
+        await ctx.reply("🔒 برای این چت، فرمان را در گروه یا خصوصی ربات اجرا کنید.")
+        return
+    elif delegated and not chats:
+        await ctx.reply("⛔️ دسترسی ارسال همگانی ندارید؛ در خصوصی فقط چت‌های واگذارشده و فعال نمایش داده می‌شوند.")
+        return
+
+    source = ctx.message.reply_to_message
+    text = broadcast_service.extract_broadcast_text(ctx.raw_text, ctx.command)
+    if source is None and not text:
+        state = await owner_broadcast.get_bot_settings(ctx.session)
+        destination_hint = ("در گروه، ارسال فقط به همان گروه محدود است.\n"
+                            if message_chat_type in {"group", "supergroup"}
+                            else "در خصوصی، مقصدها را از چت‌های فعالِ شناخته‌شده انتخاب می‌کنید.\n")
+        message_text = (
+            "⚠️ روی پیام موردنظر ریپلای کنید یا متن را داخل گیومه بنویسید.\n"
+            "نمونه: <code>ارسال همگانی &quot;سلام به همه&quot;</code>\n"
+            f"{destination_hint}\n"
+            f"وضعیت قابلیت: {'🟢 روشن' if state.broadcast_enabled else '🔴 خاموش'}")
+        keyboard = (owner_broadcast.switch_keyboard(
+            state.broadcast_enabled, int(state.broadcast_report_delete_after or 0))
+                    if is_owner else None)
+        await ctx.reply(message_text, reply_markup=keyboard)
+        return
+
+    source_ids: list[int] | None = None
+    source_chat_id: int | None = None
+    if source is not None:
+        source_chat_id = int(source.chat.id)
+        source_ids = [int(source.message_id)]
+        if source.media_group_id:
+            cached_ids = broadcast_service.media_group_cache.get_message_ids(
+                source.chat.id, str(source.media_group_id))
+            if cached_ids:
+                source_ids = [int(item) for item in cached_ids]
+
+    local_chat = message_chat_type in {"group", "supergroup"}
+    draft = await owner_broadcast.create_draft(
+        ctx.session, owner_id=user_id, source_chat_id=source_chat_id,
+        source_message_ids=source_ids, text_body=text or None,
+        selected_chat_ids=[int(chat.id) for chat in chats] if local_chat else [])
+    state = await owner_broadcast.get_bot_settings(ctx.session)
+    chats = await owner_broadcast.effective_chats(
+        ctx.session, user_id, message_chat_id=ctx.chat_id,
+        message_chat_type=message_chat_type)
+    await ctx.reply(
+        owner_broadcast._selection_text(draft, chats, bool(state.broadcast_enabled),
+                                        delegated=delegated),
+        reply_markup=owner_broadcast.selection_keyboard(
+            draft, chats, bool(state.broadcast_enabled), delegated=delegated,
+            report_delete_after=int(state.broadcast_report_delete_after or 0)))
 
 
 @command("آمار ربات", role="founder", category="owner", description="آمار کلی ربات",
@@ -411,8 +604,9 @@ async def cmd_bot_stats(ctx: CommandContext) -> None:
     await ctx.reply("\n".join([
         "📊 <b>آمار ربات</b>",
         "",
-        f"💬 تعداد گروه‌ها: {to_persian_digits(str(chats))}",
-        f"🟢 گروه‌های فعال: {to_persian_digits(str(active_chats))}",
+        f"💬 چت‌های ثبت‌شده: {to_persian_digits(str(chats))}",
+        f"🟢 چت‌های فعالِ ثبت‌شده: {to_persian_digits(str(active_chats))}",
+        "ℹ️ رابط برنامه‌نویسی ربات تلگرام (Bot API) فهرست کامل چت‌ها را نمی‌دهد؛ آمار بر پایهٔ چت‌های شناخته‌شده است.",
         f"👥 مجموع اعضا: {to_persian_digits(str(members))}",
         f"🙋 کاربران شناخته‌شده: {to_persian_digits(str(users))}",
         f"🛡 تعداد عملیات مدیریتی: {to_persian_digits(str(actions))}",
@@ -424,13 +618,15 @@ async def cmd_bot_stats(ctx: CommandContext) -> None:
 async def cmd_leave_chat(ctx: CommandContext) -> None:
     if not ctx.actor.is_bot_owner:
         return
+    import re
     from ..core.normalization import normalize_digits
 
-    digits = "".join(ch for ch in normalize_digits(ctx.arg_text, to="ascii") if ch.lstrip("-").isdigit())
-    if not digits:
-        await ctx.reply("⚠️ شناسه گروه را وارد کنید: <code>ترک گروه -100123456789</code>")
+    raw_id = normalize_digits(ctx.arg_text, to="ascii").strip()
+    if not re.fullmatch(r"-?\d{5,15}", raw_id):
+        await ctx.reply("⚠️ شناسهٔ عددی گروه را دقیق وارد کنید: "
+                        "<code>ترک گروه -100123456789</code>")
         return
-    chat_id = int(digits)
+    chat_id = int(raw_id)
     from ..core.errors import safe_call
 
     ok = await safe_call(lambda: ctx.bot.leave_chat(chat_id=chat_id), default=None,

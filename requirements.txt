@@ -3,6 +3,12 @@
 
 # Telegram framework
 aiogram==3.31.0
+Telethon==1.45.0
+
+# Instagram: public anonymous extractors; no Instagram login is required by default
+gallery-dl==1.32.17
+yt-dlp==2026.8.19
+parth-dl @ https://github.com/parthmax2/parth-dl/archive/2444a3ecd7f8f5d3865164295d9ea54c1b888acf.tar.gz
 
 # Database: SQLAlchemy 2.x (async) + SQLite driver
 SQLAlchemy==2.0.36

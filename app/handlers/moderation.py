@@ -387,9 +387,6 @@ async def cmd_user_info(ctx: CommandContext) -> None:
                               Warning.active.is_(True))
     )
     warns = len(warns_result.scalars().all())
-    from ..services.reputation import get_score
-
-    positive, negative, score = await get_score(ctx.session, ctx.chat_id, user_id)
     name = f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "—"
     lines = [
         "ℹ️ <b>اطلاعات کاربر</b>",
@@ -410,8 +407,6 @@ async def cmd_user_info(ctx: CommandContext) -> None:
         lines.append(f"🏷 تگ: {shown_tag or '—'}"
                      + (" (در تلگرام)" if live_tag else ""))
         lines.append(f"📨 تعداد پیام: {to_persian_digits(str(state.message_count if state else 0))}")
-        lines.append(f"⭐️ اعتبار: {to_persian_digits(str(score))} "
-                     f"(👍 {to_persian_digits(str(positive))} | 👎 {to_persian_digits(str(negative))})")
     if user and user.afk:
         lines.append(f"💤 AFK: {user.afk_reason or 'بله'}")
     await ctx.reply("\n".join(lines))

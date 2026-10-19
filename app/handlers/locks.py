@@ -15,6 +15,30 @@ from .registry import command
 logger = logging.getLogger("armando.handlers.locks")
 
 
+@command("استثنای ناشناس", "استثنای ارسال ناشناس", role="member", group_only=True,
+         category="locks", description="تنظیم معافیت ارسال با نام همین گروه",
+         usage="استثنای ناشناس روشن / خاموش")
+async def cmd_anonymous_sender_exemption(ctx: CommandContext) -> None:
+    if not ctx.actor.is_chat_creator:
+        await ctx.reply("⛔️ فقط سازندهٔ واقعی همین گروه می‌تواند این استثنا را تغییر دهد.")
+        return
+    value = normalize_text(ctx.arg_text, mode="command").strip()
+    if value not in {"روشن", "خاموش"}:
+        await ctx.reply("⚙️ قالب: <code>استثنای ناشناس روشن</code> یا "
+                        "<code>استثنای ناشناس خاموش</code>")
+        return
+    settings_obj = await get_settings(ctx.session, ctx.chat_id)
+    enabled = value == "روشن"
+    settings_obj.anonymous_sender_exempt = enabled
+    invalidate_settings(ctx.chat_id)
+    await ctx.session.flush()
+    if enabled:
+        await ctx.reply("✅ استثنا روشن شد؛ پیام‌های ارسال‌شده با نام همین گروه از قفل «ناشناس» معاف‌اند.")
+    else:
+        await ctx.reply("🔒 استثنا خاموش شد؛ قفل «ناشناس» پیام‌های ارسال‌شده با نام همین گروه را هم بررسی می‌کند. "
+                        "هویت انسانیِ فرستنده برای ربات قابل مشاهده نیست.")
+
+
 async def _sync_safety_settings(session, chat_id: int, key: str, enabled: bool) -> None:
     """Keep the anti-profanity / anti-porn settings in sync with their locks."""
     if key not in {"profanity", "porn"}:

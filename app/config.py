@@ -88,6 +88,20 @@ class Settings:
     ai_timeout: int = 12
     ai_score_threshold: float = 0.75
 
+    # --------------------------------------------------------- optional AI chat
+    ai_chat_enabled: bool = False
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.8-flash"
+
+    # ---------------------------------------------------------- MTProto scan
+    telegram_api_id: int | None = None
+    telegram_api_hash: str = ""
+    deleted_account_scan_interval: int = 86400
+
+    # --------------------------------------------------------- Instagram media
+    # Optional Base64 Netscape cookie file; only used in the owner's private chat.
+    instagram_cookies_b64: str = ""
+
     # ------------------------------------------------------------- market / apis
     market_cache_ttl: int = 90
     market_provider_order: str = "tgju,coingecko,erapi,nobitex,wallex"
@@ -163,6 +177,14 @@ class Settings:
             ai_enabled_default=_as_bool(values.get("ai_enabled_default")),
             ai_timeout=_as_int(values.get("ai_timeout")) or 12,
             ai_score_threshold=float(values.get("ai_score_threshold") or 0.75),
+            ai_chat_enabled=_as_bool(values.get("ai_chat_enabled")),
+            gemini_api_key=(values.get("gemini_api_key") or "").strip(),
+            gemini_model=(values.get("gemini_model") or "gemini-3.8-flash").strip(),
+            telegram_api_id=_as_int(values.get("telegram_api_id")),
+            telegram_api_hash=(values.get("telegram_api_hash") or "").strip(),
+            deleted_account_scan_interval=max(
+                3600, _as_int(values.get("deleted_account_scan_interval")) or 86400),
+            instagram_cookies_b64=(values.get("instagram_cookies_b64") or "").strip(),
             market_cache_ttl=_as_int(values.get("market_cache_ttl")) or 90,
             market_provider_order=(values.get("market_provider_order")
                                    or "tgju,coingecko,erapi,nobitex,wallex").strip(),
@@ -215,7 +237,8 @@ class Settings:
 
     def safe_dict(self) -> dict[str, Any]:
         """Dump for logs/backups - secrets are masked or removed."""
-        secret_keys = {"bot_token", "ai_api_key", "webhook_secret", "database_url", "redis_url"}
+        secret_keys = {"bot_token", "ai_api_key", "gemini_api_key", "telegram_api_hash",
+                       "instagram_cookies_b64", "webhook_secret", "database_url", "redis_url"}
         data = {f.name: getattr(self, f.name) for f in fields(self)}
         for key in secret_keys:
             if data.get(key):

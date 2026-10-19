@@ -99,7 +99,6 @@ async def cmd_my_stats(ctx: CommandContext) -> None:
         f"🖼 رسانه: {to_persian_digits(str(state.media_count or 0))}",
         f"⌨️ دستور: {to_persian_digits(str(state.command_count or 0))}",
         f"⚠️ اخطارها: {to_persian_digits(str(state.warn_count or 0))}",
-        f"⭐️ امتیاز: {to_persian_digits(str(state.reputation_total or 0))}",
     ]
     if state.last_message_at:
         lines.append(f"🕒 آخرین فعالیت: {persian_relative(state.last_message_at)}")

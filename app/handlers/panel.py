@@ -17,7 +17,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core import cache
-from ..core.errors import safe_answer, safe_call, safe_delete, safe_edit
+from ..core.errors import (safe_answer, safe_call, safe_delete, safe_edit,
+                           safe_edit_markup, schedule_delete)
 from ..core.normalization import to_persian_digits
 from ..db.models import (
     BotRole,
@@ -69,7 +70,6 @@ COMMAND_HINTS: dict[str, str] = {
     "history": "📜 روی پیام کاربر ریپلای کنید و بنویسید:\n<code>تاریخچه</code>",
     "info": "ℹ️ روی پیام کاربر ریپلای کنید و بنویسید:\n<code>اطلاعات</code>",
     "me": "👤 بنویسید: <code>آمار من</code> یا <code>اطلاعات</code>",
-    "myrep": "⭐️ بنویسید: <code>امتیاز من</code>",
     "afkhelp": "💤 برای رفتن به حالت AFK بنویسید: <code>برم افک دلیل</code>\nبرای بازگشت: <code>برگشتم</code>",
     "stats": "📊 بنویسید: <code>آمار</code>",
     "top": "🏆 بنویسید: <code>فعال‌ترین‌ها ۳۰</code>",
@@ -88,7 +88,19 @@ COMMAND_HINTS: dict[str, str] = {
     "rmtrusted": "➖ روی پیام کاربر ریپلای کنید و بنویسید:\n<code>عزل ویژه</code>",
     "taglist": "🏷 بنویسید: <code>لیست تگ‌ها</code>",
     "settag": "🏷 روی پیام کاربر ریپلای کنید و بنویسید:\n<code>تگ متن تگ</code>",
-    "deltag": "🗑 روی پیام کاربر ریپلای کنید و بنویسید:\n<code>حذف تگ</code>",
+    "deltag": "🗑 روی پیام کاربر ریپلای کنید و بنویسید <code>حذف تگ</code>؛ این فقط تگ نمایشی را پاک می‌کند.",
+    "tagexclude": ("🚫 <code>حذف از تگ</code> خود مدیر را از «تگ همه» مستثنا می‌کند.\n"
+                   "با ریپلای روی پیام عضو، هم مدیر و هم عضو هدف مستثنا می‌شوند.\n"
+                   "برای فقط خودتان: <code>حذف از تگ خود</code>."),
+    "tagrestore": ("✅ با ریپلای روی پیام عضو بنویسید <code>افزودن به تگ</code>؛ "
+                   "برای بازگرداندن خودتان: <code>افزودن به تگ خود</code>."),
+    "broadcast": ("📢 در خصوصی ربات بنویسید <code>ارسال همگانی</code> و پیام/متن را تعیین کنید؛ "
+                   "مقصدها را انتخاب و مرور کنید. ارسال فقط با تأیید نهایی آغاز می‌شود."),
+    "rootgrant": ("🔐 مالک ربات: <code>دسترسی روت @username</code> را در همان گروه اجرا کنید؛ "
+                  "کاربر باید همان‌جا مدیر یا مالک باشد. در خصوصی، چت فعال را از فهرست انتخاب کنید."),
+    "rootrevoke": ("🗑 <code>لغو دسترسی روت @username</code> در گروه فقط همان چت را لغو می‌کند؛ "
+                   "در خصوصی همهٔ واگذاری‌های آن کاربر لغو می‌شود."),
+    "rootlist": "🔐 <code>فهرست دسترسی‌های روت</code> را فقط در خصوصی ربات اجرا کنید.",
     "listfilters": "🚫 بنویسید: <code>لیست فیلتر</code>",
     "listnotes": "📒 بنویسید: <code>لیست یادداشت‌ها</code>",
     "listcommands": "⌨️ بنویسید: <code>لیست دستورات</code>",
@@ -159,15 +171,37 @@ async def _prepare_ctx(session: AsyncSession, bot: Bot, chat_id: int, user_id: i
             "commands": len(commands),
         }
     if section == "members":
-        staff = await session.execute(
-            select(BotRole).where(BotRole.chat_id == chat_id))
+        # Telegram is the source of truth for Telegram administrators. Do not
+        # report a false zero when the Bot API lookup is unavailable.
+        try:
+            admins = await bot.get_chat_administrators(chat_id=chat_id)
+            admin_count: int | None = len({
+                int(item.user.id) for item in admins or []
+                if getattr(item, "user", None) is not None
+            })
+        except Exception as exc:  # noqa: BLE001 - keep the panel usable
+            logger.info("could not load administrator count for chat %s: %s",
+                        chat_id, exc.__class__.__name__)
+            admin_count = None
+
+        staff_rows = await session.execute(
+            select(BotRole.user_id).where(BotRole.chat_id == chat_id))
+        staff_ids = {int(user_id_) for user_id_ in staff_rows.scalars().all()}
+        # Older deployments may have internal roles only on chat_members.
+        legacy_staff = await session.execute(
+            select(ChatMemberState.user_id).where(
+                ChatMemberState.chat_id == chat_id,
+                ChatMemberState.bot_role.is_not(None),
+                ChatMemberState.bot_role != ""))
+        staff_ids.update(int(user_id_) for user_id_ in legacy_staff.scalars().all())
+
         trusted = await session.execute(
-            select(TrustedUser).where(TrustedUser.chat_id == chat_id))
+            select(TrustedUser.user_id).where(TrustedUser.chat_id == chat_id))
         tags = await tag_service.tags_of_chat(session, chat_id)
         ctx["member_counts"] = {
-            "admins": extra.get("admin_count", 0),
-            "staff": len(list(staff.scalars().all())),
-            "trusted": len(list(trusted.scalars().all())),
+            "admins": admin_count,
+            "staff": len(staff_ids),
+            "trusted": len({int(user_id_) for user_id_ in trusted.scalars().all()}),
             "tags": len(tags),
         }
     if section == "staff":
@@ -228,7 +262,6 @@ async def _prepare_ctx(session: AsyncSession, bot: Bot, chat_id: int, user_id: i
         ctx["report_counts"] = {"open": int(open_count), "total": int(total)}
     if section == "profile":
         from ..db.models import User
-        from ..services.reputation import get_score
 
         state_result = await session.execute(
             select(ChatMemberState).where(ChatMemberState.chat_id == chat_id,
@@ -239,7 +272,6 @@ async def _prepare_ctx(session: AsyncSession, bot: Bot, chat_id: int, user_id: i
             select(func.count(Warning.id)).where(Warning.chat_id == chat_id,
                                                  Warning.user_id == user_id,
                                                  Warning.active.is_(True))) or 0
-        positive, negative, score = await get_score(session, chat_id, user_id)
         ctx["profile"] = {
             "user_id": user_id,
             "name": f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "—",
@@ -247,7 +279,6 @@ async def _prepare_ctx(session: AsyncSession, bot: Bot, chat_id: int, user_id: i
             "role": ROLE_LABELS.get(_role_key(actor), "👤 عضو") if actor else "👤 عضو",
             "tag": state.tag if state else None,
             "messages": int(state.message_count or 0) if state else 0,
-            "score": int(score),
             "warns": int(warns),
         }
     return ctx
@@ -324,7 +355,6 @@ async def _send_member_panel(bot: Bot, chat_id: int, user_id: int, session: Asyn
     state = await get_member_state_snapshot(session, target_chat_id, user_id)
     chat = await session.get(Chat, target_chat_id)
     warns = int(state.get("warn_count") or 0)
-    reputation = int(state.get("reputation_total") or 0)
     tag = state.get("tag") or "—"
     lines = [
         f"🤖 <b>{BOT_NAME}</b>",
@@ -334,7 +364,6 @@ async def _send_member_panel(bot: Bot, chat_id: int, user_id: int, session: Asyn
         f"🎖 سمت شما: {ROLE_LABELS.get('member', 'عضو')}",
         f"🏷 تگ شما: <code>{tag}</code>",
         f"⚠️ اخطارها: {to_persian_digits(str(warns))}",
-        f"⭐️ اعتبار: {to_persian_digits(str(reputation))}",
         "",
         "ℹ️ پنل مدیریت گروه فقط برای مدیران و مالک گروه نمایش داده می‌شود.",
         "برای دیدن دستورات آزاد بنویسید: <code>راهنما</code>",
@@ -1062,6 +1091,432 @@ async def _ensure_admin(callback: CallbackQuery, bot: Bot, chat_id: int,
     await safe_answer(callback, "⛔️ فقط مدیران گروه می‌توانند تنظیمات را تغییر دهند.",
                       show_alert=True)
     return False
+
+
+@router.callback_query(F.data.startswith("bc:"))
+async def on_owner_broadcast(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    """Owner broadcast picker, preview, confirmation, and delivery."""
+    import asyncio
+
+    from ..services import owner_access, owner_broadcast
+    from ..core.normalization import to_persian_digits
+
+    parts = parse_cb(callback.data or "")
+    action = parts[1] if len(parts) > 1 else ""
+    user_id = int(callback.from_user.id)
+    is_owner = owner_broadcast.is_bot_owner(user_id)
+    if action == "noop":
+        await safe_answer(callback)
+        return
+
+    draft_id = 0
+    if len(parts) > 2 and parts[2].lstrip("-").isdigit():
+        draft_id = int(parts[2])
+
+    if action == "switch":
+        if not is_owner:
+            await safe_answer(callback, "⛔️ فقط مالک ربات می‌تواند ارسال همگانی را روشن یا خاموش کند.",
+                              show_alert=True)
+            return
+        state = await owner_broadcast.get_bot_settings(session)
+        state.broadcast_enabled = not bool(state.broadcast_enabled)
+        state.updated_by = user_id
+        await session.flush()
+        if draft_id:
+            draft = await owner_broadcast.get_draft(session, draft_id, user_id)
+            if draft is not None and callback.message is not None:
+                if state.broadcast_enabled:
+                    draft.stage = "select"
+                    draft.page = 0
+                draft.updated_at = datetime.utcnow()
+                chats = await owner_broadcast.effective_chats(
+                    session, user_id,
+                    message_chat_id=callback.message.chat.id,
+                    message_chat_type=callback.message.chat.type)
+                await safe_edit(
+                    callback.message,
+                    owner_broadcast._selection_text(draft, chats, bool(state.broadcast_enabled),
+                                                    delegated=False),
+                    reply_markup=owner_broadcast.selection_keyboard(
+                        draft, chats, bool(state.broadcast_enabled), delegated=False,
+                        report_delete_after=int(state.broadcast_report_delete_after or 0)),
+                    parse_mode=ParseMode.HTML)
+            elif callback.message is not None:
+                await safe_edit(
+                    callback.message,
+                    "📢 وضعیت ارسال همگانی تغییر کرد: "
+                    + ("🟢 روشن" if state.broadcast_enabled else "🔴 خاموش")
+                    + "\nبرای آماده‌سازی پیام، دوباره فرمان ارسال همگانی را بفرستید.",
+                    reply_markup=owner_broadcast.switch_keyboard(
+                        bool(state.broadcast_enabled),
+                        int(state.broadcast_report_delete_after or 0)),
+                    parse_mode=ParseMode.HTML)
+        elif callback.message is not None:
+            await safe_edit(
+                callback.message,
+                "📢 وضعیت ارسال همگانی: "
+                + ("🟢 روشن" if state.broadcast_enabled else "🔴 خاموش")
+                + "\nبرای ادامه، فرمان ارسال همگانی را دوباره بفرستید.",
+                reply_markup=owner_broadcast.switch_keyboard(
+                    bool(state.broadcast_enabled),
+                    int(state.broadcast_report_delete_after or 0)),
+                parse_mode=ParseMode.HTML)
+        await safe_answer(callback, "✅ وضعیت ذخیره شد.")
+        return
+
+    if action == "delay":
+        if not is_owner:
+            await safe_answer(callback, "⛔️ فقط مالک ربات می‌تواند زمان حذف نتیجهٔ خصوصی را تغییر دهد.",
+                              show_alert=True)
+            return
+        if len(parts) < 4 or not parts[3].lstrip("-").isdigit():
+            await safe_answer(callback, "⛔️ مقدار زمان نامعتبر است.", show_alert=True)
+            return
+        delta = int(parts[3])
+        if delta not in {-1, 1}:
+            await safe_answer(callback, "⛔️ مقدار تغییر نامعتبر است.", show_alert=True)
+            return
+        state = await owner_broadcast.get_bot_settings(session)
+        current_delay = getattr(state, "broadcast_report_delete_after", 12)
+        current_delay = 12 if current_delay is None else int(current_delay)
+        state.broadcast_report_delete_after = max(0, min(600, current_delay + delta))
+        state.updated_by = user_id
+        await session.flush()
+        value = int(state.broadcast_report_delete_after)
+        value_text = "خاموش" if value == 0 else f"{to_persian_digits(str(value))} ثانیه"
+        await safe_answer(callback, f"✅ زمان حذف نتیجهٔ خصوصی: {value_text}")
+        if callback.message is not None:
+            if draft_id:
+                draft = await owner_broadcast.get_draft(session, draft_id, user_id)
+                if draft is not None:
+                    chats = await owner_broadcast.effective_chats(
+                        session, user_id,
+                        message_chat_id=callback.message.chat.id,
+                        message_chat_type=callback.message.chat.type)
+                    if draft.stage == "review":
+                        await safe_edit(
+                            callback.message,
+                            owner_broadcast.review_text(draft, chats, delegated=False),
+                            reply_markup=owner_broadcast.review_keyboard(
+                                draft, bool(state.broadcast_enabled), delegated=False,
+                                report_delete_after=value),
+                            parse_mode=ParseMode.HTML)
+                    else:
+                        await safe_edit(
+                            callback.message,
+                            owner_broadcast._selection_text(
+                                draft, chats, bool(state.broadcast_enabled), delegated=False),
+                            reply_markup=owner_broadcast.selection_keyboard(
+                                draft, chats, bool(state.broadcast_enabled), delegated=False,
+                                report_delete_after=value),
+                            parse_mode=ParseMode.HTML)
+            else:
+                await safe_edit_markup(
+                    callback.message,
+                    owner_broadcast.switch_keyboard(bool(state.broadcast_enabled), value))
+        return
+
+    draft = await owner_broadcast.get_draft(session, draft_id, user_id) if draft_id else None
+    if draft is None:
+        await safe_answer(callback, "ℹ️ این پیش‌نویس منقضی شده یا دیگر معتبر نیست.", show_alert=True)
+        return
+    delegated = not is_owner
+    chats = await owner_broadcast.effective_chats(
+        session, user_id,
+        message_chat_id=callback.message.chat.id if callback.message else 0,
+        message_chat_type=callback.message.chat.type if callback.message else "private")
+    if delegated and not chats and action != "cancel":
+        await safe_answer(callback, "⛔️ دسترسی روت فعالی برای هیچ چتی ندارید.", show_alert=True)
+        return
+    state = await owner_broadcast.get_bot_settings(session)
+
+    if action == "cancel":
+        await owner_broadcast.cancel_draft(session, draft)
+        await safe_answer(callback, "پیش‌نویس لغو شد.")
+        if callback.message is not None:
+            await safe_edit(callback.message, "❌ پیش‌نویس ارسال همگانی لغو شد.")
+        return
+
+    if not state.broadcast_enabled:
+        await safe_answer(callback, "🔴 ارسال همگانی خاموش است؛ فقط مالک ربات می‌تواند آن را روشن کند.",
+                          show_alert=True)
+        if callback.message is not None:
+            await safe_edit(
+                callback.message,
+                owner_broadcast._selection_text(draft, chats, False, delegated=delegated),
+                reply_markup=owner_broadcast.selection_keyboard(
+                    draft, chats, False, delegated=delegated,
+                    report_delete_after=int(state.broadcast_report_delete_after or 0)),
+                parse_mode=ParseMode.HTML)
+        return
+
+    if action == "page":
+        if len(parts) < 4 or not parts[3].lstrip("-").isdigit():
+            await safe_answer(callback)
+            return
+        draft.page = max(0, int(parts[3]))
+    elif action == "pick":
+        if len(parts) < 5 or not parts[3].lstrip("-").isdigit():
+            await safe_answer(callback)
+            return
+        target_chat_id = int(parts[3])
+        if target_chat_id not in {int(chat.id) for chat in chats}:
+            await safe_answer(callback, "⛔️ این چت در فهرست مجاز شما نیست.", show_alert=True)
+            return
+        selected = {int(item) for item in (draft.selected_chat_ids or [])}
+        if target_chat_id in selected:
+            selected.remove(target_chat_id)
+        else:
+            selected.add(target_chat_id)
+        draft.selected_chat_ids = sorted(selected)
+        draft.page = max(0, int(parts[4]))
+    elif action == "all":
+        draft.selected_chat_ids = [int(chat.id) for chat in chats]
+    elif action == "clear":
+        draft.selected_chat_ids = []
+    elif action == "edit":
+        draft.stage = "select"
+        if len(parts) > 3 and parts[3].lstrip("-").isdigit():
+            draft.page = max(0, int(parts[3]))
+    elif action == "review":
+        authorized_ids = {int(chat.id) for chat in chats}
+        selected_ids = {int(item) for item in (draft.selected_chat_ids or [])} & authorized_ids
+        if not selected_ids:
+            await safe_answer(callback, "⚠️ دست‌کم یک گروه یا کانال را انتخاب کنید.", show_alert=True)
+            return
+        draft.selected_chat_ids = sorted(selected_ids)
+        draft.stage = "review"
+    elif action == "send":
+        if draft.stage != "review":
+            await safe_answer(callback, "⚠️ ابتدا پیش‌نمایش و مقصدها را مرور کنید.", show_alert=True)
+            return
+        authorized = {int(chat.id): chat for chat in chats}
+        selected_ids = {int(item) for item in (draft.selected_chat_ids or [])}
+        valid_chats: list[Chat] = []
+        skipped_access = 0
+        for chat_id in sorted(selected_ids):
+            chat = authorized.get(chat_id)
+            if chat is None:
+                skipped_access += 1
+                continue
+            valid_chats.append(chat)
+        if not valid_chats:
+            await safe_answer(callback, "⚠️ هیچ مقصد مجازی باقی نمانده است.", show_alert=True)
+            return
+        await safe_answer(callback, "⏳ ارسال آغاز شد.")
+        draft.stage = "sending"
+        draft.updated_at = datetime.utcnow()
+        await session.flush()
+        # Persist the one-use state before making network calls, preventing a
+        # second click from starting the same broadcast again.
+        await session.commit()
+        if callback.message is not None:
+            await safe_edit(callback.message, "⏳ ارسال به مقصدهای تأییدشده در حال انجام است…")
+
+        sent = failed = 0
+        message_ids = [int(item) for item in (draft.source_message_ids or [])]
+        for index, chat in enumerate(valid_chats):
+            try:
+                live_chat = await session.get(Chat, int(chat.id), populate_existing=True)
+                if (live_chat is None or not live_chat.is_active
+                        or live_chat.type not in {"group", "supergroup", "channel"}):
+                    skipped_access += 1
+                    continue
+                if delegated:
+                    current_grants = await owner_access.root_chat_ids(session, user_id)
+                    if int(chat.id) not in current_grants or not await owner_access.is_current_admin_or_creator(
+                            bot, int(chat.id), user_id):
+                        skipped_access += 1
+                        continue
+                if draft.source_chat_id is not None and message_ids:
+                    if len(message_ids) > 1:
+                        await bot.copy_messages(
+                            chat_id=chat.id, from_chat_id=draft.source_chat_id,
+                            message_ids=message_ids)
+                    else:
+                        await bot.copy_message(
+                            chat_id=chat.id, from_chat_id=draft.source_chat_id,
+                            message_id=message_ids[0])
+                elif draft.text_body:
+                    await bot.send_message(
+                        chat_id=chat.id, text=f"📢 اطلاعیه\n\n{draft.text_body}",
+                        parse_mode=None, disable_web_page_preview=True)
+                else:
+                    failed += 1
+                    continue
+                sent += 1
+            except Exception as exc:  # noqa: BLE001 - count per-chat failures safely
+                failed += 1
+                logger.info("ارسال همگانی به چت %s ناموفق بود: %s",
+                            chat.id, exc.__class__.__name__)
+            if index + 1 < len(valid_chats):
+                await asyncio.sleep(0.05)
+
+        draft.stage = "sent"
+        draft.updated_at = datetime.utcnow()
+        await session.commit()
+        result_lines = [
+            "📢 <b>ارسال همگانی پایان یافت</b>",
+            f"✅ موفق: {to_persian_digits(str(sent))}",
+            f"⚠️ ناموفق: {to_persian_digits(str(failed))}",
+        ]
+        if skipped_access:
+            result_lines.append(
+                f"🔐 ردشدن به‌علت تغییر دسترسی/عضویت: {to_persian_digits(str(skipped_access))}")
+        if callback.message is not None:
+            edited = await safe_edit(callback.message, "\n".join(result_lines),
+                                     parse_mode=ParseMode.HTML)
+            if edited is not None:
+                if callback.message.chat.type == "private":
+                    raw_delay = getattr(state, "broadcast_report_delete_after", 12)
+                    delete_after = 12 if raw_delay is None else int(raw_delay)
+                else:
+                    chat_settings = await get_settings(session, callback.message.chat.id)
+                    delete_after = int(chat_settings.report_delete_after or 0)
+                schedule_delete(bot, callback.message.chat.id,
+                                callback.message.message_id, delete_after,
+                                context="broadcast_result_autodelete")
+        return
+    else:
+        await safe_answer(callback)
+        return
+
+    draft.updated_at = datetime.utcnow()
+    await session.flush()
+    await safe_answer(callback)
+    if callback.message is None:
+        return
+    if draft.stage == "review":
+        await safe_edit(
+            callback.message,
+            owner_broadcast.review_text(draft, chats, delegated=delegated),
+            reply_markup=owner_broadcast.review_keyboard(
+                draft, bool(state.broadcast_enabled), delegated=delegated,
+                report_delete_after=int(state.broadcast_report_delete_after or 0)),
+            parse_mode=ParseMode.HTML)
+    else:
+        await safe_edit(
+            callback.message,
+            owner_broadcast._selection_text(draft, chats, bool(state.broadcast_enabled),
+                                            delegated=delegated),
+            reply_markup=owner_broadcast.selection_keyboard(
+                draft, chats, bool(state.broadcast_enabled), delegated=delegated,
+                report_delete_after=int(state.broadcast_report_delete_after or 0)),
+            parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data.startswith("rt:"))
+async def on_root_access(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    """Handle chat picking and owner-only revocation of scoped root grants."""
+    import html
+
+    from ..config import settings as app_settings
+    from ..services import owner_access
+    from ..keyboards.factory import cb, danger, markup
+
+    parts = parse_cb(callback.data or "")
+    action = parts[1] if len(parts) > 1 else ""
+    if not app_settings.owner_id or callback.from_user.id != app_settings.owner_id:
+        await safe_answer(callback, "⛔️ فقط مالک ربات می‌تواند این دسترسی را تغییر دهد.",
+                          show_alert=True)
+        return
+    if action == "noop":
+        await safe_answer(callback)
+        return
+
+    if action in {"page", "grant", "cancel"}:
+        if len(parts) < 3 or not parts[2].isdigit():
+            await safe_answer(callback)
+            return
+        draft_id = int(parts[2])
+        draft = await owner_access.get_root_draft(session, draft_id, callback.from_user.id)
+        if draft is None:
+            await safe_answer(callback, "ℹ️ این درخواست منقضی شده است.", show_alert=True)
+            return
+        if action == "cancel":
+            await session.delete(draft)
+            await session.flush()
+            await safe_answer(callback, "درخواست لغو شد.")
+            if callback.message is not None:
+                await safe_edit(callback.message, "❌ درخواست دسترسی روت لغو شد.")
+            return
+        chats = await owner_access.known_active_chats(session)
+        if action == "page":
+            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+            page = max(0, page)
+            await safe_answer(callback)
+            if callback.message is not None:
+                await safe_edit(
+                    callback.message, owner_access.root_picker_text(draft, chats, page),
+                    reply_markup=owner_access.root_picker_keyboard(draft, chats, page),
+                    parse_mode=ParseMode.HTML)
+            return
+        if len(parts) < 4 or not parts[3].lstrip("-").isdigit():
+            await safe_answer(callback)
+            return
+        chat_id = int(parts[3])
+        chat = await session.get(Chat, chat_id)
+        if chat is None or not chat.is_active or chat.type not in {"group", "supergroup", "channel"}:
+            await safe_answer(callback, "ℹ️ این چت دیگر فعال یا شناخته‌شده نیست.", show_alert=True)
+            return
+        try:
+            user_id, name, username = await owner_access.resolve_admin_target(
+                bot, session, chat_id, draft.target_ref)
+        except owner_access.RootAccessError as exc:
+            await safe_answer(callback, str(exc), show_alert=True)
+            return
+        created = await owner_access.grant_root(
+            session, chat_id=chat_id, user_id=user_id, granted_by=callback.from_user.id)
+        user = await session.get(User, user_id)
+        if user is not None:
+            user.first_name = name[:128]
+            user.username = username
+        await session.delete(draft)
+        await session.flush()
+        await safe_answer(callback, "✅ دسترسی محدود ثبت شد." if created else "ℹ️ از قبل ثبت شده بود.")
+        if callback.message is not None:
+            message_text = (
+                f"{'✅ دسترسی روت فعال شد' if created else 'ℹ️ دسترسی روت از قبل فعال بود'}\n\n"
+                f"👤 کاربر: {html.escape(name)} (<code>{user_id}</code>)\n"
+                f"💬 چت: {html.escape(chat.title or str(chat.id))}\n"
+                "🔐 فقط همین چت به محدودهٔ دسترسی اضافه شد؛ عملیات سراسری به او داده نمی‌شود.")
+            await safe_edit(
+                callback.message, message_text,
+                reply_markup=markup([[danger("لغو همین دسترسی", cb("rt", "revoke", chat_id, user_id))]]),
+                parse_mode=ParseMode.HTML)
+        return
+
+    if action == "revoke":
+        if len(parts) < 4 or not parts[2].lstrip("-").isdigit() or not parts[3].isdigit():
+            await safe_answer(callback)
+            return
+        chat_id, user_id = int(parts[2]), int(parts[3])
+        removed = await owner_access.revoke_root(session, chat_id=chat_id, user_id=user_id)
+        await safe_answer(callback, "🗑 دسترسی لغو شد." if removed else "ℹ️ دسترسی از قبل برداشته شده بود.")
+        if callback.message is None:
+            return
+        if callback.message.chat.type != "private":
+            await safe_edit(callback.message, "🗑 دسترسی روت همین چت لغو شد.")
+            return
+        grants = await owner_access.list_root_grants(session)
+        if not grants:
+            await safe_edit(callback.message, "✅ هیچ دسترسی روت فعالی وجود ندارد.")
+            return
+        lines = ["🔐 <b>دسترسی‌های روت</b>", ""]
+        buttons = []
+        for grant, chat, user in grants[:50]:
+            member_name = (f"{user.first_name or ''} {user.last_name or ''}".strip()
+                           or (f"@{user.username}" if user.username else str(user.id)))
+            chat_name = chat.title or (f"@{chat.username}" if chat.username else str(chat.id))
+            lines.append(f"• {html.escape(member_name)} — {html.escape(chat_name)}")
+            buttons.append([danger(
+                f"🗑 {member_name[:18]} · {chat_name[:18]}",
+                cb("rt", "revoke", chat.id, grant.user_id))])
+        await safe_edit(callback.message, "\n".join(lines), reply_markup=markup(buttons),
+                        parse_mode=ParseMode.HTML)
+        return
+
+    await safe_answer(callback)
 
 
 @router.callback_query.middleware()

@@ -15,7 +15,7 @@ from aiogram import Bot
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..config import settings
+from .. import config
 from ..core import cache
 from ..core import ratelimit
 from ..core.errors import safe_restrict, safe_unban
@@ -70,9 +70,11 @@ class SchedulerService:
 
     def __init__(self, bot: Bot, tick: int | None = None) -> None:
         self.bot = bot
-        self.tick = tick or settings.scheduler_tick
+        self.tick = tick or config.settings.scheduler_tick
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._deleted_scan_task: asyncio.Task | None = None
+        self._deleted_scanner = None
         self._last_snapshot_day: dict[int, str] = {}
 
     # ------------------------------------------------------------------ lifecycle
@@ -81,18 +83,47 @@ class SchedulerService:
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._run(), name="armando-scheduler")
-        logger.info("scheduler started (tick=%ss)", self.tick)
+        await self._start_deleted_account_scanner()
+        logger.info("زمان‌بند فعال شد؛ فاصلهٔ بررسی %s ثانیه است.", self.tick)
+
+    async def _start_deleted_account_scanner(self) -> None:
+        cfg = config.settings
+        if not (cfg.telegram_api_id and cfg.telegram_api_hash):
+            logger.info("اسکن MTProto غیرفعال است؛ TELEGRAM_API_ID و TELEGRAM_API_HASH تنظیم نشده‌اند.")
+            return
+        from .deleted_accounts import DeletedAccountScanner
+
+        scanner = DeletedAccountScanner(
+            self.bot, api_id=cfg.telegram_api_id, api_hash=cfg.telegram_api_hash,
+            bot_token=cfg.bot_token, session_path=config.DATA_DIR / "armando-mtproto.session")
+        try:
+            await asyncio.wait_for(scanner.connect(), timeout=25)
+        except Exception as exc:  # noqa: BLE001 - MTProto is optional and must not stop the bot
+            await scanner.disconnect()
+            logger.warning("اتصال MTProto برقرار نشد؛ اسکن حساب‌های حذف‌شده غیرفعال ماند: %s",
+                           exc.__class__.__name__)
+            return
+        self._deleted_scanner = scanner
+        self._deleted_scan_task = asyncio.create_task(
+            scanner.run_periodically(self._stop, cfg.deleted_account_scan_interval),
+            name="armando-deleted-account-scan")
+        logger.info("اسکن MTProto حساب‌های حذف‌شده فعال شد.")
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+        for task in (self._task, self._deleted_scan_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
         self._task = None
-        logger.info("scheduler stopped")
+        self._deleted_scan_task = None
+        if self._deleted_scanner is not None:
+            await self._deleted_scanner.disconnect()
+            self._deleted_scanner = None
+        logger.info("زمان‌بند متوقف شد.")
 
     async def _run(self) -> None:
         while not self._stop.is_set():

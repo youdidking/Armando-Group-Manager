@@ -81,7 +81,7 @@ class IsPersianCommand:
         raw = message.text or message.caption or ""
         if not raw or raw.startswith("/"):
             return False
-        match = registry.match(raw)
+        match = registry.match(raw, has_reply=message.reply_to_message is not None)
         if match is None:
             return False
         return {"command_match": match}
@@ -219,6 +219,14 @@ async def on_text_command(message: Message, session: AsyncSession, bot: Bot,
 async def on_private_text(message: Message, session: AsyncSession, bot: Bot) -> None:
     raw = (message.text or "").strip()
     if not raw or raw.startswith("/"):
+        return
+    from ..services.instagram import handle_instagram_message
+
+    if await handle_instagram_message(message, bot):
+        return
+    from ..services.ai_chat import handle_ai_message
+
+    if await handle_ai_message(message, bot):
         return
     connected = await connection_service.get_active(session, message.from_user.id)
     if connected:

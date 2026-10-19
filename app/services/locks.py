@@ -218,11 +218,7 @@ def _d_russian(m, s: LockState) -> bool:
 
 
 def _d_anonymous(m, s: LockState) -> bool:
-    """Messages posted **as a channel** (the anonymous sender of a group).
-
-    A hidden group admin is a real administrator and stays exempt; Telegram
-    only hides their name, so there is nothing to restrict there either.
-    """
+    """Messages posted under a chat/channel identity in Telegram."""
     return getattr(m, "sender_chat", None) is not None
 
 
@@ -502,6 +498,11 @@ async def apply_violation(bot: Bot, session: AsyncSession, *, message: Message,
     # that is stronger than a simple delete.
     sender_chat = getattr(message, "sender_chat", None)
     if sender_chat is not None:
+        if sender_chat.id == message.chat.id:
+            # Never ban the group itself. Telegram does not expose which human
+            # administrator authored an anonymous group post.
+            await safe_delete(bot, message.chat.id, message.message_id, context="lock_delete")
+            return "🗑 پیام با نام گروه حذف شد؛ هویت مدیر فرستنده برای ربات قابل مشاهده نیست."
         return await _punish_sender_chat(bot, session, chat_id=message.chat.id,
                                          sender_chat_id=sender_chat.id,
                                          name=getattr(sender_chat, "title", "") or "کانال",

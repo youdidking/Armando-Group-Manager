@@ -19,7 +19,6 @@ DISABLEABLE: dict[str, str] = {
     "market": "💱 ارز و قیمت",
     "time": "🕒 تاریخ و ساعت",
     "afk": "💤 AFK",
-    "reputation": "⭐️ سیستم اعتبار",
     "report": "📢 گزارش",
     "stats": "📊 آمار",
     "translate": "🌐 ترجمه",
@@ -32,7 +31,6 @@ ALIASES: dict[str, str] = {
     "ارز": "market", "قیمت": "market", "ارز دیجیتال": "market", "بورس": "market",
     "تاریخ": "time", "ساعت": "time", "زمان": "time",
     "ای اف کی": "afk", "آفک": "afk", "اف کی": "afk",
-    "اعتبار": "reputation", "امتیاز": "reputation",
     "گزارش": "report", "گزارشها": "report",
     "آمار": "stats", "امار": "stats",
     "ترجمه": "translate",
@@ -88,7 +86,8 @@ async def enable(session: AsyncSession, chat_id: int, key: str) -> bool:
 def disabled_text(keys: Iterable[str]) -> str:
     from ..core.normalization import to_persian_digits
 
-    keys = list(keys)
+    # Historical keys for retired features stay in storage but are not shown.
+    keys = [key for key in keys if key in DISABLEABLE]
     if not keys:
         return "✅ هیچ بخشی غیرفعال نشده است."
     lines = ["🚫 <b>بخش‌های غیرفعال این گروه</b>", ""]

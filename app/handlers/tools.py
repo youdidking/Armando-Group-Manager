@@ -1,5 +1,5 @@
 """Utility commands: pins, purge, tags, AFK, reports, staff, trust, logs,
-scheduling, backup, connection, reputation and help."""
+scheduling, backup, connection and help."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from datetime import datetime
 
 from sqlalchemy import select
 
+from ..core.duration import parse_duration
 from ..core.errors import safe_call
 from ..core.normalization import normalize_digits, normalize_text, to_persian_digits
 from ..core.timeutils import persian_datetime
@@ -18,7 +19,6 @@ from ..keyboards.menus import BOT_NAME, help_text
 from ..db.models import (
     AuditLog,
     BotRole,
-    ChatMemberState,
     Report,
     ScheduledMessage,
     TrustedUser,
@@ -33,11 +33,11 @@ from ..services import (
     personal,
     pins as pin_service,
     purge as purge_service,
-    reputation,
     tags as tag_service,
 )
-from ..services.chat_state import (get_settings, invalidate_member, invalidate_settings,
-                                   set_bot_role, set_trust)
+from ..services.chat_state import (get_member_state, get_settings, invalidate_member,
+                                   invalidate_settings, set_bot_role, set_trust)
+from ..services.permissions import is_anonymous_sender
 from ..services.roles import can_manage_role
 from .common import (CommandContext, display_name, guard_target, require, undo_keyboard,
                      user_html)
@@ -215,6 +215,73 @@ async def cmd_del_tag(ctx: CommandContext) -> None:
     await tag_service.set_tag(ctx.session, ctx.chat_id, target.user_id, None)
     await tag_service.apply_member_tag(ctx.bot, ctx.chat_id, target.user_id, None)
     await ctx.reply(f"🗑 تگ {user_html(target.user_id, target.full_name)} حذف شد.")
+
+
+@command("حذف از تگ", "حذف از تگ خود", role="admin", permission="manage",
+         category="tags", description="استثناکردن خود یا عضو از تگ همه", group_only=True)
+async def cmd_exclude_from_mention_all(ctx: CommandContext) -> None:
+    if not await require(ctx, role="admin", permission="manage"):
+        return
+    ids: list[int] = []
+    caller = ctx.message.from_user
+    if caller is not None and not is_anonymous_sender(caller):
+        ids.append(ctx.user_id)
+
+    self_only = normalize_text(ctx.command, mode="command") == normalize_text(
+        "حذف از تگ خود", mode="command")
+    if ctx.message.reply_to_message is not None and not self_only:
+        target = await ctx.target()
+        if target.error or not target.user_id:
+            await ctx.reply(target.error or "❌ کاربر هدف مشخص نشد.")
+            return
+        if target.user_id not in ids:
+            ids.append(target.user_id)
+
+    if not ids:
+        await ctx.reply("⚠️ هویت ادمینِ ارسال‌کننده مشخص نیست؛ روی پیام یک عضو ریپلای کنید.")
+        return
+
+    for user_id in ids:
+        state = await get_member_state(ctx.session, ctx.chat_id, user_id, create=True)
+        state.mention_opt_out = True
+        state.updated_at = datetime.utcnow()
+    await ctx.session.flush()
+
+    lines = ["🏷 از این پس اعضای زیر در «تگ همه» منشن نمی‌شوند:"]
+    for user_id in ids:
+        lines.append(f"• {user_html(user_id, await display_name(ctx.session, user_id))}")
+    lines.append("\nبرای بازگردانی، روی پیام عضو ریپلای کنید و بنویسید "
+                 "<code>افزودن به تگ</code>؛ برای خودتان: <code>افزودن به تگ خود</code>.")
+    await ctx.reply("\n".join(lines))
+
+
+@command("افزودن به تگ", "افزودن به تگ خود", role="admin", permission="manage",
+         category="tags", description="بازگرداندن خود یا عضو به تگ همه", group_only=True)
+async def cmd_restore_mention_all(ctx: CommandContext) -> None:
+    if not await require(ctx, role="admin", permission="manage"):
+        return
+    self_only = normalize_text(ctx.command, mode="command") == normalize_text(
+        "افزودن به تگ خود", mode="command")
+    if ctx.message.reply_to_message is not None and not self_only:
+        target = await ctx.target()
+        if target.error or not target.user_id:
+            await ctx.reply(target.error or "❌ کاربر هدف مشخص نشد.")
+            return
+        user_ids = [target.user_id]
+    else:
+        if is_anonymous_sender(ctx.message.from_user):
+            await ctx.reply("⚠️ برای بازگردانی، روی پیام عضو ریپلای کنید.")
+            return
+        user_ids = [ctx.user_id]
+
+    for user_id in user_ids:
+        state = await get_member_state(ctx.session, ctx.chat_id, user_id, create=True)
+        state.mention_opt_out = False
+        state.updated_at = datetime.utcnow()
+    await ctx.session.flush()
+    user_id = user_ids[0]
+    await ctx.reply(f"✅ {user_html(user_id, await display_name(ctx.session, user_id))} "
+                    "دوباره در «تگ همه» منشن می‌شود.")
 
 
 @command("لیست تگ‌ها", "تگ‌ها", role="member", category="tags", description="نمایش تگ اعضا")
@@ -830,37 +897,6 @@ async def cmd_disabled_list(ctx: CommandContext) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Reputation
-# --------------------------------------------------------------------------- #
-@command("امتیاز من", "اعتبار من", role="member", category="members",
-         description="نمایش امتیاز شما")
-async def cmd_my_rep(ctx: CommandContext) -> None:
-    positive, negative, score = await reputation.get_score(ctx.session, ctx.chat_id, ctx.user_id)
-    await ctx.reply(f"⭐️ امتیاز شما: {to_persian_digits(str(score))}\n"
-                    f"👍 مثبت: {to_persian_digits(str(positive))} | "
-                    f"👎 منفی: {to_persian_digits(str(negative))}")
-
-
-@command("جدول اعتبار", "برترین‌ها از نظر امتیاز", role="member", category="members",
-         description="نمایش جدول اعتبار")
-async def cmd_rep_board(ctx: CommandContext) -> None:
-    await ctx.reply(await reputation.leaderboard_text(ctx.session, ctx.chat_id))
-
-
-@command("ریست اعتبار", role="admin", permission="manage", category="members",
-         description="صفر کردن امتیاز یک کاربر")
-async def cmd_reset_rep(ctx: CommandContext) -> None:
-    if not await require(ctx, role="admin", permission="manage"):
-        return
-    target = await ctx.target()
-    if target is None or not target.user_id:
-        await ctx.reply("❌ کاربر هدف مشخص نشد.")
-        return
-    await reputation.reset_score(ctx.session, ctx.chat_id, target.user_id)
-    await ctx.reply(f"♻️ امتیاز {user_html(target.user_id, target.full_name)} صفر شد.")
-
-
-# --------------------------------------------------------------------------- #
 # Help / panel entry points
 # --------------------------------------------------------------------------- #
 HELP_TOPICS: dict[str, str] = {
@@ -869,7 +905,7 @@ HELP_TOPICS: dict[str, str] = {
     "قیمت": "market", "قوانین": "rules", "آمار": "stats", "پیامها": "messages",
     "پیام‌ها": "messages", "گزارش": "report", "فدراسیون": "federation",
     "اعضا": "members", "یادداشتها": "notes", "یادداشت‌ها": "notes",
-    "مدیران": "staff", "ابزارها": "tools",
+    "مدیران": "staff", "ابزارها": "tools", "مالک": "owner", "مالک ربات": "owner",
 }
 
 
@@ -895,7 +931,8 @@ async def cmd_help(ctx: CommandContext) -> None:
              "• <code>راهنما فیلترها</code>",
              "• <code>راهنما خوشامد</code>",
              "• <code>راهنما سرگرمی</code>",
-             "• <code>راهنما ارز</code>", "",
+             "• <code>راهنما ارز</code>",
+             "• <code>راهنما ابزارها</code> • <code>راهنما مالک</code> (ویژه مالک ربات)", "",
              "🎛 برای پنل گرافیکی: <code>پنل</code> یا <code>تنظیمات</code>"]
     await ctx.reply("\n".join(lines))
 
@@ -1241,28 +1278,33 @@ async def cmd_set_description(ctx: CommandContext) -> None:
 # --------------------------------------------------------------------------- #
 @command("ساخت لینک", "لینک جدید", "لینک موقت", "لینک دعوت", "ایجاد لینک",
          role="admin", permission="invite", category="tools",
-         description="ساخت لینک دعوت موقت گروه", usage="ساخت لینک")
+         description="ساخت لینک دعوت موقت گروه (پیش‌فرض: ۶۰ دقیقه)",
+         usage="ساخت لینک [مدت؛ مثل ۱ ساعت]")
 async def cmd_create_link(ctx: CommandContext) -> None:
     from datetime import datetime, timedelta
-
-    from ..core.errors import safe_call
-    from ..core.normalization import to_persian_digits
+    from math import ceil
 
     if not await require(ctx, role="admin", permission="invite"):
         return
-    minutes = 60
+    if not await _require_bot_right(ctx, "can_invite_users", "دعوت کاربران با لینک"):
+        return
+    # No duration argument means a one-hour invite. Parse explicit durations
+    # as seconds so «۱ ساعت» is exactly 60 minutes (not 6 hours).
+    duration_seconds = 60 * 60
     limit = 1
     raw = normalize_text(ctx.arg_text, mode="command")
-    if "ساعت" in raw:
-        minutes = 60 * 6
     if "نامحدود" in raw or "دائم" in raw:
-        minutes, limit = 0, 0
+        duration_seconds, limit = 0, 0
+    elif raw:
+        parsed = parse_duration(raw)
+        if parsed is not None:
+            duration_seconds = parsed
     kwargs: dict[str, object] = {
         "chat_id": ctx.chat_id,
         "name": f"Armando-{ctx.user_id}",
     }
-    if minutes:
-        kwargs["expire_date"] = int((datetime.utcnow() + timedelta(minutes=minutes)).timestamp())
+    if duration_seconds:
+        kwargs["expire_date"] = int((datetime.utcnow() + timedelta(seconds=duration_seconds)).timestamp())
     if limit:
         kwargs["member_limit"] = limit
     link = await safe_call(lambda: ctx.bot.create_chat_invite_link(**kwargs),
@@ -1272,7 +1314,8 @@ async def cmd_create_link(ctx: CommandContext) -> None:
                         "را داشته باشد.")
         return
     details = []
-    if minutes:
+    if duration_seconds:
+        minutes = ceil(duration_seconds / 60)
         details.append(f"⏳ اعتبار: {to_persian_digits(str(minutes))} دقیقه")
     if limit:
         details.append(f"👤 تعداد مجاز: {to_persian_digits(str(limit))} نفر")
