@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from ..config import settings
@@ -109,6 +111,28 @@ CURRENCIES: dict[str, tuple[str, str]] = {
     "thb": ("بات تایلند", "price_thb"),
     "myr": ("رینگیت مالزی", "price_myr"),
 }
+
+# Flags make the issuing country/region immediately recognizable in every
+# currency quote. The euro is a shared currency, so its regional EU flag is used.
+CURRENCY_FLAGS: dict[str, str] = {
+    "usd": "🇺🇸", "eur": "🇪🇺", "gbp": "🇬🇧", "try": "🇹🇷",
+    "aed": "🇦🇪", "sar": "🇸🇦", "iqd": "🇮🇶", "afn": "🇦🇫",
+    "cad": "🇨🇦", "aud": "🇦🇺", "chf": "🇨🇭", "cny": "🇨🇳",
+    "inr": "🇮🇳", "rub": "🇷🇺", "sek": "🇸🇪", "kwd": "🇰🇼",
+    "azn": "🇦🇿", "amd": "🇦🇲", "thb": "🇹🇭", "myr": "🇲🇾",
+}
+CURRENCY_CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("🌎 آمریکا و اقیانوسیه", ("usd", "cad", "aud")),
+    ("🇪🇺 اروپا", ("eur", "gbp", "chf", "rub", "sek")),
+    ("🌍 خاورمیانه و همسایگان", ("try", "aed", "sar", "iqd", "afn", "kwd", "azn", "amd")),
+    ("🌏 آسیا", ("cny", "inr", "thb", "myr")),
+)
+
+
+def currency_display_name(key: str) -> str:
+    label = CURRENCIES[key][0]
+    return f"{CURRENCY_FLAGS.get(key, '💱')} {label}"
+
 
 CURRENCY_ALIASES: dict[str, str] = {
     "دلار": "usd", "دلار آمریکا": "usd", "آمریکا": "usd", "usd": "usd", "دلارامریکا": "usd",
@@ -336,21 +360,25 @@ async def usd_toman_rate() -> float | None:
 async def get_currency(key: str) -> Quote | None:
     if key not in CURRENCIES:
         return None
-    label, tgju_key = CURRENCIES[key]
+    _label, tgju_key = CURRENCIES[key]
+    label = currency_display_name(key)
     data = await fetch_tgju()
     item = data.get(tgju_key) or {}
     rials = _to_float(item.get("p"))
     if rials:
         return Quote(key=key, label=label, price=rials / 10.0, unit="toman",
-                     change=abs(_to_float(item.get("dp")) or 0.0),
+                     change=_to_float(item.get("dp")) or 0.0,
                      high=(_to_float(item.get("h")) or 0) / 10.0 or None,
                      low=(_to_float(item.get("l")) or 0) / 10.0 or None,
                      source="tgju", updated=item.get("ts") or "")
     erapi = await fetch_erapi()
-    rate = (erapi.get("rates") or {}).get(key.upper())
-    if rate:
+    rate = _to_float((erapi.get("rates") or {}).get(key.upper()))
+    if rate and rate > 0:
         usd = await usd_toman_rate()
-        price = float(rate) * (usd or 0) if usd else float(rate)
+        # ER-API rates are quoted as target-currency units per one USD; invert
+        # to display the price of one target-currency unit in Toman or USD.
+        price_usd = 1.0 / rate
+        price = price_usd * usd if usd else price_usd
         return Quote(key=key, label=label, price=price,
                      unit="toman" if usd else "usd", source="er-api",
                      updated=erapi.get("time_last_update_utc") or "")
@@ -364,7 +392,7 @@ async def get_crypto(key: str) -> Quote | None:
     data = await fetch_tgju()
     item = data.get(tgju_key) or {}
     usd_price = _to_float(item.get("p"))
-    change = abs(_to_float(item.get("dp")) or 0.0)
+    change = _to_float(item.get("dp")) or 0.0
     updated = item.get("ts") or ""
     source = "tgju"
 
@@ -372,7 +400,7 @@ async def get_crypto(key: str) -> Quote | None:
         coingecko = await fetch_coingecko([coingecko_id])
         entry = (coingecko.get(coingecko_id) or {})
         usd_price = _to_float(entry.get("usd"))
-        change = abs(_to_float(entry.get("usd_24h_change")) or 0.0)
+        change = _to_float(entry.get("usd_24h_change")) or 0.0
         source = "coingecko"
         updated = persian_datetime()
 
@@ -417,7 +445,7 @@ async def get_gold(key: str) -> Quote | None:
     if unit == "toman":
         price = price / 10.0
     return Quote(key=key, label=label, price=price, unit=unit,
-                 change=abs(_to_float(item.get("dp")) or 0.0), source="tgju",
+                 change=_to_float(item.get("dp")) or 0.0, source="tgju",
                  updated=item.get("ts") or "",
                  high=(_to_float(item.get("h")) or 0) / (10.0 if unit == "toman" else 1) or None,
                  low=(_to_float(item.get("l")) or 0) / (10.0 if unit == "toman" else 1) or None)
@@ -430,7 +458,7 @@ async def get_bourse() -> Quote | None:
     if value is None:
         return None
     return Quote(key="bourse", label="شاخص کل بورس", price=value, unit="point",
-                 change=abs(_to_float(item.get("dp")) or 0.0), source="tgju",
+                 change=_to_float(item.get("dp")) or 0.0, source="tgju",
                  updated=item.get("ts") or "")
 
 
@@ -445,6 +473,38 @@ def provider_note(quote: Quote) -> str:
     return names.get(quote.source, quote.source)
 
 
+def format_quote_timestamp(value: Any) -> str:
+    """Format parseable provider timestamps in the bot's local timezone."""
+    if value is None or value == "":
+        return ""
+    raw = str(value).strip()
+    moment: datetime | None = None
+    try:
+        numeric = float(raw)
+        if numeric >= 1_000_000_000:
+            if numeric >= 1_000_000_000_000:
+                numeric /= 1000
+            moment = datetime.fromtimestamp(numeric, tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        pass
+    if moment is None:
+        iso_text = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        try:
+            candidate = datetime.fromisoformat(iso_text)
+            if candidate.tzinfo is not None:
+                moment = candidate
+        except ValueError:
+            try:
+                candidate = parsedate_to_datetime(raw)
+                if candidate.tzinfo is not None:
+                    moment = candidate
+            except (TypeError, ValueError, OverflowError):
+                pass
+    if moment is None:
+        return to_persian_digits(raw)
+    return persian_datetime(moment, with_seconds=True)
+
+
 def quote_text(quote: Quote, *, title: str = "") -> str:
     lines = [title or f"💱 قیمت {quote.label}", ""]
     lines.append(f"💰 قیمت: {quote.price_text}")
@@ -453,9 +513,13 @@ def quote_text(quote: Quote, *, title: str = "") -> str:
     if quote.low:
         lines.append(f"📉 کمترین: {to_persian_digits(f'{quote.low:,.0f}')}")
     lines.append(f"📊 تغییر: {quote.change_text}")
+    if quote.high is not None or quote.low is not None:
+        lines.append("📍 دامنهٔ قیمت: بیشترین/کمترینِ ثبت‌شده در منبع")
+    if quote.source:
+        lines.append(f"📡 منبع: {provider_note(quote)}")
     if quote.updated:
-        stamp = to_persian_digits(str(quote.updated))
-        lines.append(f"🕒 بروزرسانی: {stamp}")
+        stamp = format_quote_timestamp(quote.updated)
+        lines.append(f"🕒 آخرین به‌روزرسانی منبع: {stamp}")
     return "\n".join(lines)
 
 
@@ -467,19 +531,19 @@ async def overview_text(limit_crypto: int = 5) -> str:
         lines.append("⚠️ در حال حاضر امکان دریافت اطلاعات وجود ندارد. کمی بعد دوباره تلاش کنید.")
         return "\n".join(lines)
 
-    currency_keys = ["usd", "eur", "gbp", "try", "aed"]
-    for key in currency_keys:
+    lines.append("<b>💱 ارزهای منتخب</b>")
+    for key in ("usd", "eur", "gbp", "try", "aed"):
         quote = await get_currency(key)
         if quote:
             lines.append(f"• {quote.label}: {quote.price_text}  {quote.change_text}")
 
-    lines.append("")
-    for key in ["coin_emami", "gram18"]:
+    lines.extend(["", "<b>🥇 طلا و سکه</b>"])
+    for key in ("coin_emami", "gram18"):
         quote = await get_gold(key)
         if quote:
             lines.append(f"• {quote.label}: {quote.price_text}  {quote.change_text}")
 
-    lines.append("")
+    lines.extend(["", "<b>🪙 ارزهای دیجیتال</b>"])
     for key in list(CRYPTO)[:limit_crypto]:
         quote = await get_crypto(key)
         if quote:
@@ -487,11 +551,10 @@ async def overview_text(limit_crypto: int = 5) -> str:
 
     bourse = await get_bourse()
     if bourse:
-        lines.append("")
-        lines.append(f"• {bourse.label}: {bourse.price_text}  {bourse.change_text}")
+        lines.extend(["", "<b>📈 بورس</b>",
+                      f"• {bourse.label}: {bourse.price_text}  {bourse.change_text}"])
 
-    lines.append("")
-    lines.append(f"🕒 {persian_datetime()}")
+    lines.extend(["", f"🕒 به‌روزرسانی صفحه: {persian_datetime()}"])
     return "\n".join(lines)
 
 
@@ -502,6 +565,25 @@ def crypto_list_text() -> str:
 
 
 def currency_list_text() -> str:
-    names = ", ".join(label for label, _ in CURRENCIES.values())
-    return (f"💵 ارزهای پشتیبانی‌شده:\n{names}\n\n"
-            "مثال: <code>قیمت دلار</code> یا <code>ارز یورو</code>")
+    lines = ["💱 <b>ارزهای پشتیبانی‌شده</b>", ""]
+    listed: set[str] = set()
+    for category, keys in CURRENCY_CATEGORIES:
+        lines.append(f"<b>{category}</b>")
+        for key in keys:
+            if key not in CURRENCIES:
+                continue
+            listed.add(key)
+            lines.append(f"• {currency_display_name(key)} — <code>{key.upper()}</code>")
+        lines.append("")
+    # Keep a newly added currency visible even before its category is curated.
+    ungrouped = [key for key in CURRENCIES if key not in listed]
+    if ungrouped:
+        lines.append("<b>💱 سایر ارزها</b>")
+        lines.extend(f"• {currency_display_name(key)} — <code>{key.upper()}</code>"
+                     for key in ungrouped)
+    lines.extend([
+        "اولویت با نرخ بازار ایران و نمایش به تومان است؛ اگر دادهٔ داخلی در دسترس نباشد، "
+        "نرخ مرجع جایگزین نمایش داده می‌شود و واحد آن کنار قیمت مشخص است.",
+        "نمونه: <code>قیمت دلار</code> • <code>قیمت یورو</code> • <code>قیمت لیر</code>",
+    ])
+    return "\n".join(lines)

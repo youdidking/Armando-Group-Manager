@@ -1623,7 +1623,7 @@ async def on_root_access(callback: CallbackQuery, session: AsyncSession, bot: Bo
                 f"✅ اختیارات روت برای {html.escape(name)} ذخیره شد.\n\n"
                 f"💬 چت: {html.escape(chat.title or str(chat.id))}\n"
                 f"🔑 {html.escape(owner_access.selected_permissions_text(selected))}\n\n"
-                "🔒 گرنت به همین چت محدود است؛ اثر بن/سکوت سراسری در گروه‌های واجد شرایط اعمال می‌شود.")
+                "🔒 این دسترسی به همین چت محدود است؛ اثر بن/سکوت سراسری فقط در مقصدهای واجد شرایط اعمال می‌شود.")
             await safe_edit(
                 callback.message, message_text,
                 reply_markup=markup([[danger("لغو همین دسترسی", cb("rt", "revoke", chat_id, target_id))]]),

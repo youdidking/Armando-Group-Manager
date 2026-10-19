@@ -6,12 +6,10 @@ import logging
 
 
 from ..core.timeutils import (
-    jalali,
-    persian_date,
-    persian_datetime,
-    persian_time,
-    season_name,
+    calendar_details_text,
+    date_details_text,
     tehran_now,
+    time_details_text,
 )
 from ..services import disabled as disabled_service
 from ..services import entertainment, market
@@ -209,30 +207,19 @@ async def cmd_currency_list(ctx: CommandContext) -> None:
 # Date & time
 # --------------------------------------------------------------------------- #
 @command("تاریخ", "تاریخ امروز", "امروز", role="member", category="market",
-         description="نمایش تاریخ شمسی امروز")
+         description="نمایش جزئیات تاریخ شمسی و میلادی امروز")
 async def cmd_date(ctx: CommandContext) -> None:
     if not await _module_enabled(ctx, "time"):
         return
-    jd = jalali()
-    lines = [
-        "📅 <b>تاریخ امروز</b>",
-        "",
-        f"🇮🇷 شمسی: {persian_date()}",
-        f"🌍 میلادی: {tehran_now().strftime('%Y/%m/%d')}",
-        f"🍃 فصل: {season_name()}",
-        f"📆 روز هفته: {persian_date().split()[0]}",
-    ]
-    lines.append(f"🗓 روز از سال: {jd.dayofyear if hasattr(jd, 'dayofyear') else '—'}")
-    await ctx.reply("\n".join(lines))
+    await ctx.reply(date_details_text(tehran_now()))
 
 
 @command("ساعت", "زمان", "الان", role="member", category="market",
-         description="نمایش ساعت و تاریخ به وقت تهران")
+         description="نمایش ساعت دقیق به وقت منطقهٔ زمانی تنظیم‌شده")
 async def cmd_time(ctx: CommandContext) -> None:
     if not await _module_enabled(ctx, "time"):
         return
-    text = f"🕒 <b>ساعت</b>\n\n⏰ {persian_time(with_seconds=True)}\n📅 {persian_date()}"
-    await ctx.reply(text)
+    await ctx.reply(time_details_text(tehran_now()))
 
 
 async def _remote_time_text() -> str:
@@ -258,5 +245,4 @@ async def _remote_time_text() -> str:
 async def cmd_calendar(ctx: CommandContext) -> None:
     if not await _module_enabled(ctx, "time"):
         return
-    await ctx.reply(f"🗓 <b>تقویم</b>\n\n{persian_datetime(with_seconds=True)}\n"
-                    f"🍃 فصل {season_name()}")
+    await ctx.reply(calendar_details_text(tehran_now()))

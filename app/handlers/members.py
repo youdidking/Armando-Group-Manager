@@ -128,8 +128,8 @@ async def on_new_members(message: Message, session: AsyncSession, bot: Bot) -> N
                     clean=bool(settings_obj.clean_join))
                 continue
 
-        # A globally muted user is restricted on entry only where the bot owner
-        # is an administrator/creator and the bot has the required right.
+        # A globally muted user is restricted on entry only where the owner is
+        # present and the bot has admin permission to restrict members.
         global_mute_reason = await global_mute_service.is_muted(session, user.id)
         if global_mute_reason is not None:
             enforced = await global_mute_service.enforce(

@@ -74,10 +74,16 @@ async def get_or_create_chat(session: AsyncSession, chat) -> Chat:
     changed = False
     title = getattr(chat, "title", "") or ""
     username = getattr(chat, "username", None)
+    chat_type = getattr(chat, "type", "group")
     if title and obj.title != title:
         obj.title, changed = title, True
     if username != obj.username:
         obj.username, changed = username, True
+    if chat_type and obj.type != chat_type:
+        obj.type, changed = chat_type, True
+    # Any update/command from a chat proves the bot still has access to it.
+    if not obj.is_active:
+        obj.is_active, changed = True, True
     if changed:
         obj.last_seen_at = now
     return obj

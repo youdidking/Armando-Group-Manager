@@ -110,8 +110,8 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
             return
 
     # A global mute is persistent and enforced independently of group settings.
-    # It is applied only in registered groups where the bot owner is currently
-    # an admin/creator and the bot itself can restrict members.
+    # It is applied only in registered supergroups where the owner is present
+    # and the bot itself has admin permission to restrict members.
     global_mute_reason = await global_mute_service.is_muted(session, user.id)
     if global_mute_reason is not None:
         enforced = await global_mute_service.enforce(

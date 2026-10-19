@@ -290,16 +290,41 @@ async def _global_mute_rollout(bot, user_id: int, source_chat_id: int, *,
     try:
         async with session_scope() as session:
             if snapshot is None:
+                chat_ids = await global_mute_service.known_chat_ids(session)
+                group_ids = await global_mute_service.known_group_chat_ids(session)
                 count = await global_mute_service.apply_everywhere(
-                    bot, session, user_id)
-                text = (f"🔇 سکوت سراسری در {to_persian_digits(str(count))} گروه اعمال شد."
-                        if count else
-                        "ℹ️ گروهی که هم‌زمان شرایط لازم را داشته باشد پیدا نشد؛ "
-                        "در گروه‌های ثبت‌شده‌ای اعمال می‌شود که مالک بات مدیر و ربات دارای حق محدودسازی باشد.")
+                    bot, session, user_id, chat_ids=chat_ids)
+                total = len(group_ids)
+                if total == 0:
+                    text = ("ℹ️ سوپرگروه فعالی در فهرست شناخته‌شدهٔ ربات برای بررسی نیست. "
+                            "چت‌ها با دریافت رویداد عضویت، پیام یا به‌روزرسانی تازه وارد فهرست می‌شوند.")
+                elif count:
+                    text = (f"🔇 سکوت سراسری در {to_persian_digits(str(count))} از "
+                            f"{to_persian_digits(str(total))} سوپرگروه ثبت‌شده اعمال شد.\n"
+                            "شرط اعمال: ربات مدیرِ دارای حق محدودسازی باشد و مالک بات در سوپرگروه حضور داشته باشد.")
+                else:
+                    text = (f"ℹ️ از {to_persian_digits(str(total))} سوپرگروه ثبت‌شده، در هیچ‌کدام "
+                            "سکوت اعمال نشد. بررسی کنید کاربر عضو و قابل محدودسازی باشد، "
+                            "ربات حق محدودسازی اعضا داشته باشد و مالک بات در سوپرگروه حضور داشته باشد. "
+                            "سکوت در خود کانال‌ها پشتیبانی نمی‌شود؛ گروه گفت‌وگوی پیوندخورده جداگانه بررسی می‌شود.")
             else:
                 count = await global_mute_service.lift_everywhere(
                     bot, session, snapshot)
-                text = f"🔊 سکوت سراسری در {to_persian_digits(str(count))} گروه برداشته شد."
+                record = await global_mute_service.get_record(session, user_id)
+                pending = len(record.applied_chat_ids or []) if record is not None else 0
+                if record is not None and record.active:
+                    text = ("ℹ️ پیش از پایان عملیات، سکوت سراسری دوباره فعال شد؛ "
+                            "محدودیت‌های ثبت‌شده حفظ شدند و پاک‌سازی انجام نشد.")
+                elif pending:
+                    text = (f"⚠️ سکوت سراسری برداشته شد و در {to_persian_digits(str(count))} سوپرگروه "
+                            f"پاک‌سازی شد؛ محدودیت {to_persian_digits(str(pending))} سوپرگروه هنوز "
+                            "رفع نشده است. دسترسی ربات را بررسی و فرمان رفع سکوت را دوباره اجرا کنید.")
+                elif not snapshot.chat_ids and count == 0:
+                    text = ("ℹ️ سکوت سراسری غیرفعال شد، اما هیچ محدودیت موفقی برای برداشتن "
+                            "در سوپرگروهی ثبت نشده بود.")
+                else:
+                    text = (f"🔊 محدودیت ثبت‌شدهٔ سکوت سراسری از "
+                            f"{to_persian_digits(str(count))} سوپرگروه برداشته شد.")
     except Exception:  # noqa: BLE001 - a background rollout must not crash the bot
         logger.exception("global mute rollout failed user=%s", user_id)
         return
@@ -409,7 +434,7 @@ async def cmd_global_ban_list(ctx: CommandContext) -> None:
 
 
 @command("سکوت سراسری", role="founder", category="owner",
-         description="ساکت‌کردن کاربر در گروه‌های واجد شرایط", allow_in_private=True)
+         description="ساکت‌کردن کاربر در سوپرگروه‌های واجد شرایط", allow_in_private=True)
 async def cmd_global_mute(ctx: CommandContext) -> None:
     if not await _may_use_owner_permission(ctx, "global_mute"):
         await ctx.reply("⛔️ این فرمان فقط برای مالک ربات یا دارندهٔ اختیار «سکوت سراسری» در همین چت مجاز است.")
@@ -432,15 +457,16 @@ async def cmd_global_mute(ctx: CommandContext) -> None:
         user = User(id=target.user_id, first_name=target.first_name or "",
                     last_name=target.last_name, username=target.username)
         ctx.session.add(user)
-    await global_mute_service.activate(
-        ctx.session, user_id=target.user_id, muted_by=ctx.user_id, reason=reason)
-    # Commit before starting the independent rollout session so its per-chat
-    # audit list cannot race this update transaction.
-    await ctx.session.commit()
+    async with global_mute_service.user_lock(target.user_id):
+        await global_mute_service.activate(
+            ctx.session, user_id=target.user_id, muted_by=ctx.user_id, reason=reason)
+        # Commit before starting the independent rollout session so its per-chat
+        # audit list cannot race this update transaction.
+        await ctx.session.commit()
     await ctx.reply(
         f"🔇 کاربر <code>{target.user_id}</code> به‌صورت سراسری ساکت شد.\n"
         f"📌 {html.escape(reason)}\n"
-        "↻ اعمال در گروه‌های ثبت‌شده‌ای انجام می‌شود که مالک بات در آن‌ها مدیر/سازنده و ربات دارای حق محدودسازی است.")
+        "↻ در سوپرگروه‌های شناخته‌شده‌ای اعمال می‌شود که ربات مدیرِ دارای حق محدودسازی باشد و مالک بات در آن‌ها حضور داشته باشد. سکوت در خود کانال امکان‌پذیر نیست.")
     asyncio.create_task(_global_mute_rollout(ctx.bot, target.user_id, ctx.chat_id))
 
 
@@ -462,13 +488,15 @@ async def cmd_global_unmute(ctx: CommandContext) -> None:
         await ctx.reply((target.error if target and target.error else None)
                         or "❌ کاربر هدف مشخص نشد.")
         return
-    snapshot = await global_mute_service.deactivate(ctx.session, user_id=user_id)
+    async with global_mute_service.user_lock(user_id):
+        snapshot = await global_mute_service.deactivate(ctx.session, user_id=user_id)
+        if snapshot is not None:
+            await ctx.session.commit()
     if snapshot is None:
         await ctx.reply("ℹ️ این کاربر در سکوت سراسری نبود.")
         return
-    await ctx.session.commit()
     await ctx.reply(f"🔊 سکوت سراسری کاربر <code>{user_id}</code> لغو شد؛ "
-                    "برداشتن محدودیت‌های ثبت‌شده در گروه‌ها انجام می‌شود.")
+                    "پاک‌سازی محدودیت‌های ثبت‌شده در سوپرگروه‌ها در حال انجام است.")
     asyncio.create_task(_global_mute_rollout(
         ctx.bot, user_id, ctx.chat_id, snapshot=snapshot))
 

@@ -105,6 +105,9 @@ class ChatTrackingMiddleware(BaseMiddleware):
                         from datetime import datetime
 
                         row.last_seen_at = datetime.utcnow()
+                        row.is_active = True
+                        if getattr(chat, "type", None):
+                            row.type = chat.type
                         if chat.title and row.title != chat.title:
                             row.title = chat.title
                 except Exception as exc:  # noqa: BLE001
