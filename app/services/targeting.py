@@ -229,6 +229,37 @@ async def resolve_target(bot: Bot, session: AsyncSession, message: Message,
     return TargetResult(error="❌ کاربر هدف پیدا نشد. روی پیام او ریپلای کنید یا شناسه عددی/نام‌کاربری بدهید.")
 
 
+async def resolve_target_reference(bot: Bot, session: AsyncSession, chat_id: int,
+                                   reference: str) -> TargetResult:
+    """Resolve one ID or username without using the command's replied message."""
+    raw = (reference or "").strip()
+    normalized = normalize_digits(raw, to="ascii")
+    if ID_RE.fullmatch(normalized):
+        user_id = int(normalized)
+        from ..db.models import User
+
+        user = await session.get(User, user_id)
+        if user is not None:
+            return TargetResult(user_id=user.id, first_name=user.first_name or "",
+                                last_name=user.last_name, username=user.username, source="id")
+        try:
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+            user = member.user
+            return TargetResult(user_id=user.id, first_name=user.first_name or "",
+                                last_name=user.last_name, username=user.username, source="id")
+        except Exception:  # noqa: BLE001 - Telegram may not reveal absent IDs
+            return TargetResult(user_id=user_id, first_name=f"کاربر {user_id}", source="id")
+
+    match = USERNAME_RE.fullmatch(raw)
+    if match:
+        username = match.group(1)
+        resolved = await _resolve_username(bot, session, chat_id, username)
+        if resolved is not None:
+            return resolved
+        return TargetResult(error=f"کاربر @{username} در فهرست قابل‌شناسایی نیست.")
+    return TargetResult(error="شناسه یا نام‌کاربری نامعتبر است.")
+
+
 def extract_duration_and_reason(tokens: list[str]) -> tuple[int | None, str, list[str]]:
     """Split remaining tokens into ``(duration_seconds, reason, rest)``."""
     from ..core.duration import parse_duration
@@ -242,5 +273,4 @@ def extract_duration_and_reason(tokens: list[str]) -> tuple[int | None, str, lis
                 duration = parsed
                 continue
         rest.append(token)
-    reason = " ".join(rest).strip()
-    return duration, reason, rest
+    return duration, " ".join(rest).strip(), rest

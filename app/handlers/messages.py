@@ -15,7 +15,6 @@ Pipeline order (cheapest and most important first):
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 
@@ -67,14 +66,23 @@ async def _notify(bot: Bot, chat_id: int, text: str, *, reply_to: int | None = N
     except Exception:  # noqa: BLE001
         return
 
-    if ttl <= 0:
-        return
+    # The session-level request middleware applies the fixed 30-second TTL to
+    # every bot-authored message in groups, regardless of the old per-notice TTL.
 
-    async def _later() -> None:
-        await asyncio.sleep(ttl)
-        await safe_delete(bot, chat_id, message.message_id, context="notice_cleanup")
 
-    asyncio.create_task(_later())
+@router.channel_post()
+async def on_channel_post(message: Message, session: AsyncSession, bot: Bot) -> None:
+    """Offer explicit read-only AI replies in channels where the bot is an admin."""
+    await get_or_create_chat(session, message.chat)
+    chat_settings = await get_settings_cached(session, message.chat.id)
+    from ..services.ai_chat import handle_ai_message
+
+    await handle_ai_message(
+        message, bot,
+        selected_model=chat_settings.get("ai_chat_model") or None,
+        session=session,
+        ai_agent_enabled=bool(chat_settings.get("ai_agent_enabled")),
+    )
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
@@ -275,7 +283,11 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
         return
     from ..services.ai_chat import handle_ai_message
 
-    if await handle_ai_message(message, bot):
+    if await handle_ai_message(
+            message, bot,
+            selected_model=settings.get("ai_chat_model") or None,
+            session=session,
+            ai_agent_enabled=bool(settings.get("ai_agent_enabled"))):
         return
 
     # ------------------------------------------------------- content triggers

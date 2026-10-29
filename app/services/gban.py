@@ -80,6 +80,15 @@ async def enforce(bot: Bot, session: AsyncSession, *, chat_id: int, chat_title: 
     banned = await ban_in_chat(bot, chat_id, user_id)
     if not banned:
         return False
+    try:
+        from .ban_reports import report_successful_ban
+
+        await report_successful_ban(
+            bot, session, chat_id=chat_id, target_id=user_id, actor_id=bot.id,
+            reason=reason, source="global_ban", chat_title=chat_title,
+            target_name=user_name, action="ban")
+    except Exception as exc:  # noqa: BLE001 - report errors must not undo enforcement
+        logger.warning("global-ban report failed (%s)", exc.__class__.__name__)
     if clean and message_id is not None:
         await safe_delete(bot, chat_id, message_id, context="gban_cleanup")
     await safe_send(
@@ -115,6 +124,16 @@ async def enforce_everywhere(bot: Bot, session: AsyncSession, user_id: int, reas
     for chat_id in ids:
         if await ban_in_chat(bot, chat_id, user_id):
             done += 1
+            try:
+                from .ban_reports import report_successful_ban
+
+                await report_successful_ban(
+                    bot, session, chat_id=chat_id, target_id=user_id,
+                    actor_id=bot.id, reason=reason, source="global_ban",
+                    action="ban")
+            except Exception as exc:  # noqa: BLE001 - keep the federation/global sweep running
+                logger.warning("global-ban report failed chat=%s (%s)",
+                               chat_id, exc.__class__.__name__)
         await asyncio.sleep(delay)   # stay well below the Telegram flood limits
     return done
 

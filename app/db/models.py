@@ -186,7 +186,16 @@ class ChatSettings(Base, TimestampMixin):
     # ------------------------------------------------------------------ welcome
     welcome_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
     welcome_text: Mapped[str] = mapped_column(
-        Text, default="🌸 سلام {first_name} عزیز!\nبه گروه {chat_name} خوش آمدید.", nullable=False
+        Text,
+        default=("╭─── ༺ خوش‌آمدید ༻ ───╮\n"
+                 "🌷 سلام {mention} عزیز!\n\n"
+                 "🆔 شناسهٔ شما: <code>{user_id}</code>\n"
+                 "🔗 نام کاربری: <code>{username}</code>\n"
+                 "💬 گروه: <b>{chat_name}</b>\n"
+                 "🗓 زمان ورود: {date}، ساعت {time}\n\n"
+                 "📜 لطفاً پیش از گفتگو، قوانین گروه را مطالعه کنید.\n"
+                 "╰────────────────────╯"),
+        nullable=False,
     )
     welcome_media: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     welcome_buttons: Mapped[list | None] = mapped_column(JSON, nullable=True)
@@ -197,9 +206,10 @@ class ChatSettings(Base, TimestampMixin):
     goodbye_buttons: Mapped[list | None] = mapped_column(JSON, nullable=True)
     goodbye_delete_after: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    # Auto-delete reports created by the bot in this group (0 = disabled).
+    # Legacy per-chat override is retained for schema compatibility; the global
+    # outgoing-message lifecycle now enforces a fixed thirty-second group TTL.
     report_delete_after: Mapped[int] = mapped_column(
-        Integer, default=12, nullable=False, server_default="12")
+        Integer, default=30, nullable=False, server_default="30")
 
     # -------------------------------------------------------- service messages
     clean_join: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
@@ -226,6 +236,10 @@ class ChatSettings(Base, TimestampMixin):
     # Ban when somebody joins and leaves again within this many seconds (0=off)
     quick_leave_ban: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
     quick_leave_seconds: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    # Send private details about departures/leave-guard bans to owner and the
+    # bot-root delegates scoped to this group.
+    leave_notify_owner: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default=FALSE)
 
     # ------------------------------------------------------ sticky ban (anti rejoin)
     # When a member is removed (ban / kick) the ban stays in place, so the user
@@ -256,8 +270,15 @@ class ChatSettings(Base, TimestampMixin):
     log_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
     log_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # ai_enabled is for moderation analysis only. Chat conversation selection is
+    # independent and stored per group in ai_chat_model. The agent memory is an
+    # explicit per-group opt-in and retains message text for seven days.
     ai_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
     ai_threshold: Mapped[float] = mapped_column(Float, default=0.75, nullable=False)
+    ai_chat_model: Mapped[str] = mapped_column(
+        String(200), default="", nullable=False, server_default=text("''"))
+    ai_agent_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default=FALSE)
 
     filter_default_action: Mapped[str] = mapped_column(String(24), default="delete", nullable=False)
     filter_default_mode: Mapped[str] = mapped_column(String(16), default="word", nullable=False)
@@ -655,6 +676,45 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class GroupMessageMemory(Base):
+    """Short-lived text memory for groups that explicitly enable the AI agent."""
+
+    __tablename__ = "group_message_memory"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "message_id", name="uq_group_memory_chat_message"),
+        Index("ix_group_memory_chat_time", "chat_id", "created_at"),
+        Index("ix_group_memory_created", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.id", ondelete="CASCADE"), nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    speaker_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    username: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    message_type: Mapped[str] = mapped_column(String(24), default="text", nullable=False)
+    text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    reply_to_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PendingPrivateReport(Base):
+    """Undelivered owner/root ban reports, retried when the user starts the bot."""
+
+    __tablename__ = "pending_private_reports"
+    __table_args__ = (
+        Index("ix_pending_private_reports_recipient", "recipient_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    recipient_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    report_text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class BotSettings(Base, TimestampMixin):
     """Small set of persistent bot-wide switches (currently broadcast)."""
 
@@ -762,6 +822,7 @@ ALL_MODELS: tuple[type[Base], ...] = (
     ModerationAction, Lock, FilterRule, Note, PersonalCommand, MagicTrigger,
     ReactionRule, CaptchaSession, Report, ScheduledMessage, Federation,
     FederationAdmin, FederationMember, Connection, UserActivity,
-    GroupStatSnapshot, AuditLog, BanRecord, BotSettings, BroadcastDraft,
-    BotRootGrant, GlobalMute, RootGrantDraft, SchemaVersion,
+    GroupStatSnapshot, AuditLog, GroupMessageMemory, PendingPrivateReport,
+    BanRecord, BotSettings, BroadcastDraft, BotRootGrant, GlobalMute,
+    RootGrantDraft, SchemaVersion,
 )

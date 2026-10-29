@@ -96,6 +96,9 @@ async def on_start(message: Message, session: AsyncSession, bot: Bot) -> None:
     if message.chat.type == "private":
         await safe_send(bot, message.chat.id, WELCOME_PRIVATE, parse_mode=ParseMode.HTML,
                         reply_markup=await start_keyboard(bot))
+        from ..services.ban_reports import deliver_pending_reports
+
+        await deliver_pending_reports(bot, session, message.from_user.id)
         return
     await get_or_create_chat(session, message.chat)
     await safe_send(

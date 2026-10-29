@@ -98,6 +98,92 @@ async def _migration_9(engine: AsyncEngine) -> None:
 
 MIGRATIONS[9] = _migration_9
 
+
+async def _migration_10(engine: AsyncEngine) -> None:
+    """Store the independent per-group AI chat model selection."""
+    await add_column(engine, "chat_settings", "ai_chat_model",
+                     "VARCHAR(200) NOT NULL DEFAULT ''")
+
+
+MIGRATIONS[10] = _migration_10
+
+
+async def _migration_11(engine: AsyncEngine) -> None:
+    """Enable optional private notifications for group leave events."""
+    await add_column(engine, "chat_settings", "leave_notify_owner",
+                     "BOOLEAN NOT NULL DEFAULT 0")
+
+
+MIGRATIONS[11] = _migration_11
+
+
+async def _migration_12(engine: AsyncEngine) -> None:
+    """Add explicit per-group AI memory opt-in; preserve already selected AI chats."""
+    await add_column(engine, "chat_settings", "ai_agent_enabled",
+                     "BOOLEAN NOT NULL DEFAULT 0")
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "UPDATE chat_settings SET ai_agent_enabled = TRUE "
+            "WHERE ai_chat_model IS NOT NULL AND TRIM(ai_chat_model) <> ''"))
+
+
+MIGRATIONS[12] = _migration_12
+
+
+async def _migration_13(engine: AsyncEngine) -> None:
+    """Replace only the shipped default welcome text; leave administrator templates intact."""
+    if await check_missing_columns(engine, "chat_settings", ["welcome_text"]):
+        return
+    new_default = (
+        "╭─── ༺ خوش‌آمدید ༻ ───╮\n"
+        "🌷 سلام {mention} عزیز!\n\n"
+        "🆔 شناسهٔ شما: <code>{user_id}</code>\n"
+        "🔗 نام کاربری: <code>{username}</code>\n"
+        "💬 گروه: <b>{chat_name}</b>\n"
+        "🗓 زمان ورود: {date}، ساعت {time}\n\n"
+        "📜 لطفاً پیش از گفتگو، قوانین گروه را مطالعه کنید.\n"
+        "╰────────────────────╯")
+    legacy_defaults = (
+        "🌸 سلام {first_name} عزیز!\nبه گروه {chat_name} خوش آمدید.",
+        "🌸 سلام {first_name} عزیز!\nبه گروه {chat_name} خوش آمدی.\n\n"
+        "📜 لطفاً قوانین را مطالعه کن: /قوانین",
+    )
+    async with engine.begin() as conn:
+        for old_default in legacy_defaults:
+            await conn.execute(
+                text("UPDATE chat_settings SET welcome_text = :new "
+                     "WHERE welcome_text = :old"),
+                {"new": new_default, "old": old_default})
+
+
+MIGRATIONS[13] = _migration_13
+
+
+async def _migration_14(engine: AsyncEngine) -> None:
+    """Retire the configurable group TTL in favor of the fixed 20-second policy."""
+    if await check_missing_columns(engine, "chat_settings", ["report_delete_after"]):
+        return
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "UPDATE chat_settings SET report_delete_after = 20 "
+            "WHERE report_delete_after <> 20"))
+
+
+MIGRATIONS[14] = _migration_14
+
+
+async def _migration_15(engine: AsyncEngine) -> None:
+    """Change the fixed global group-message TTL from 20 to 30 seconds."""
+    if await check_missing_columns(engine, "chat_settings", ["report_delete_after"]):
+        return
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "UPDATE chat_settings SET report_delete_after = 30 "
+            "WHERE report_delete_after <> 30"))
+
+
+MIGRATIONS[15] = _migration_15
+
 CURRENT_VERSION = max(MIGRATIONS) if MIGRATIONS else 0
 
 

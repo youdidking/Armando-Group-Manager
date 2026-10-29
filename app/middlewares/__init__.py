@@ -63,6 +63,28 @@ class ThrottlingMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+class GroupMemoryMiddleware(BaseMiddleware):
+    """Capture Telegram-delivered group/channel messages for opted-in seven-day memory."""
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        if isinstance(event, Message):
+            session: AsyncSession | None = data.get("session")
+            if session is not None and event.chat.type in {"group", "supergroup", "channel"}:
+                try:
+                    from ..services.ai_memory import remember_group_message
+
+                    await remember_group_message(session, event)
+                except Exception as exc:  # noqa: BLE001 - memory must never block moderation
+                    logger.warning("group AI-memory capture skipped (%s)",
+                                   exc.__class__.__name__)
+        return await handler(event, data)
+
+
 class ChatTrackingMiddleware(BaseMiddleware):
     """Keep chat metadata fresh (cheap: only touches a few rows per update)."""
 
@@ -79,6 +101,12 @@ class ChatTrackingMiddleware(BaseMiddleware):
         message = event if isinstance(event, Message) else getattr(event, "message", None)
         if session is not None and message is not None and getattr(message, "chat", None):
             chat = message.chat
+            try:
+                from ..core.message_lifecycle import remember_chat_type
+
+                remember_chat_type(chat.id, chat.type)
+            except Exception:  # noqa: BLE001 - metadata cache must never block updates
+                pass
 
             # Telegram never announces a profile edit, so every update is one
             # more chance to notice that somebody renamed themselves.

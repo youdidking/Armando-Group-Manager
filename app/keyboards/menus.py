@@ -86,11 +86,12 @@ SECTIONS: dict[str, tuple[str, str, str]] = {
     "disabled": ("🚫 بخش‌های غیرفعال", "admin", "settings"),
     "tags": ("🏷 تگ‌ها", "admin", "settings"),
     "rules": ("📜 قوانین", "admin", "settings"),
+    "ai_chat": ("💬 گفت‌وگوی هوشمند", "admin", "settings"),
 }
 
 MAIN_ORDER = ["users", "security", "locks", "filters", "welcome", "messages",
               "stats", "members", "fun", "settings", "help"]
-SETTINGS_ORDER = ["security", "locks", "filters", "welcome", "warnings", "captcha",
+SETTINGS_ORDER = ["security", "ai_chat", "locks", "filters", "welcome", "warnings", "captcha",
                   "antispam", "raid", "night", "tags", "rules", "reports", "staff",
                   "trust", "logs", "schedule", "federation", "backup", "disabled"]
 
@@ -125,6 +126,11 @@ def state_text(label: str, value: bool) -> str:
 
 def toggle_button(label: str, field: str, value: bool, panel: str) -> Any:
     return onoff(f"{label}  {state_icon(value)}", value, cb("set", field, int(not value), panel))
+
+
+def reset_button(section: str, label: str = "♻️ بازگشت این بخش به پیش‌فرض") -> list[Any]:
+    """A per-section reset entry; the panel handler always asks for confirmation."""
+    return [danger(label, cb("reset", "ask", section))]
 
 
 def number_buttons(label: str, field: str, value: int, panel: str, *,
@@ -222,7 +228,7 @@ def _panel_security(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         state_text("ضدپورن", porn_enabled),
         state_text("ضد Raid", bool(settings.get("antiraid_enabled"))),
         state_text("CAPTCHA", bool(settings.get("captcha_enabled"))),
-        state_text("تحلیل هوش مصنوعی", bool(settings.get("ai_enabled"))),
+        state_text("تحلیل هوشمند پیام‌ها", bool(settings.get("ai_enabled"))),
         state_text("حالت شب", bool(settings.get("night_mode_enabled"))),
     ])
     panel = "security"
@@ -233,13 +239,15 @@ def _panel_security(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
          toggle_button("🔞 ضدپورن", "anti_porn_enabled", porn_enabled, panel)],
         [toggle_button("🛡 ضد Raid", "antiraid_enabled", bool(settings.get("antiraid_enabled")), panel),
          toggle_button("🤖 CAPTCHA", "captcha_enabled", bool(settings.get("captcha_enabled")), panel)],
-        [toggle_button("🧠 هوش مصنوعی", "ai_enabled", bool(settings.get("ai_enabled")), panel),
+        [toggle_button("🧠 تحلیل هوشمند پیام‌ها", "ai_enabled", bool(settings.get("ai_enabled")), panel),
          toggle_button("🌙 حالت شب", "night_mode_enabled", bool(settings.get("night_mode_enabled")), panel)],
+        [primary("💬 گفت‌وگوی هوشمند", cb("panel", "ai_chat"))],
         [primary("🌊 تنظیمات ضدفلاود", cb("panel", "antispam")),
          primary("⚠️ تنظیمات اخطار", cb("panel", "warnings"))],
         [primary("🤖 تنظیمات کپچا", cb("panel", "captcha")),
          primary("🛡 تنظیمات ضد Raid", cb("panel", "raid"))],
         [primary("🔒 قفل‌ها", cb("panel", "locks")), primary("🌙 حالت شب", cb("panel", "night"))],
+        reset_button("security", "♻️ بازنشانی تنظیمات امنیتی"),
         row(home()),
     ])
     return text, keyboard
@@ -266,6 +274,9 @@ def _panel_locks(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     lines.append("")
     lines.append("🚪 <b>قفل خروج</b>")
     lines.append(leave_status_text(settings))
+    lines.append("📨 هر بن موفق، در هر گروه، با جزئیات کامل به پی‌وی مالک ربات و دارندگان روت همان گروه فرستاده می‌شود؛ پیام گروهی پس از ۳۰ ثانیه پاک می‌شود.")
+    if settings.get("leave_notify_owner"):
+        lines.append("📬 گزارش خصوصیِ خروج‌هایی که به بن منجر نشده‌اند نیز روشن است.")
 
     buttons = []
     for key in keys:
@@ -289,10 +300,13 @@ def _panel_locks(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         leave_rows.append(number_buttons("ثانیه", "quick_leave_seconds",
                                          int(settings.get("quick_leave_seconds") or 10),
                                          "locks", step=5, minimum=3, maximum=600))
+    leave_rows.append([toggle_button("📬 گزارش خروج بدون بن", "leave_notify_owner",
+                                     bool(settings.get("leave_notify_owner")), "locks")])
     rows.extend(leave_rows)
     group_buttons = [primary(LOCK_GROUPS[g], cb("lockpage", g)) for g in LOCK_GROUPS]
     rows.append(group_buttons)
     rows.append([danger("🧹 غیرفعال‌سازی همه قفل‌ها", cb("conf", "clearlocks", "all"))])
+    rows.append(reset_button("locks", "♻️ بازنشانی قفل‌ها و خروج"))
     rows.append(row(home()))
     return "\n".join(lines), markup(rows)
 
@@ -354,6 +368,7 @@ def _panel_filters(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
          primary("🎴 محرک‌های استیکر", cb("cmd", "listmagic"))],
         [danger("🧹 حذف همه فیلترها", cb("conf", "clearfilters", "blocklist")),
          danger("🧹 حذف همه یادداشت‌ها", cb("conf", "clearnotes", "all"))],
+        reset_button("filters", "♻️ بازگردانی تنظیمات پیش‌فرض فیلتر"),
         row(home()),
     ])
     return text, keyboard
@@ -386,6 +401,7 @@ def _panel_welcome(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
          toggle_button("🧩 حذف سرویسی", "clean_service", bool(settings.get("clean_service")), panel)],
         [toggle_button("📣 حذف پست کانال", "clean_channel_post", bool(settings.get("clean_channel_post")), panel)],
         [primary("🤖 تنظیمات کپچا", cb("panel", "captcha"))],
+        [danger("♻️ بازگشت خوشامد به پیش‌فرض", cb("reset", "ask", "welcome"))],
         row(home()),
     ])
     return text, keyboard
@@ -420,6 +436,7 @@ def _panel_warnings(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         number_buttons("روز", "warn_expire_days", int(settings.get("warn_expire_days") or 0),
                        "warnings", step=1, minimum=0, maximum=365),
         [danger("🚫 پاکسازی کل اخطارهای گروه", cb("conf", "clearwarns", "all"))],
+        reset_button("warnings", "♻️ بازنشانی تنظیمات اخطار"),
         row(home()),
     ])
     return text, keyboard
@@ -455,6 +472,7 @@ def _panel_captcha(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         [btn("🚫 اقدام پس از شکست:", cb("noop"))],
         *action_selector(panel, "captcha_fail_action", fail,
                          options={"kick": "اخراج", "ban": "بن", "mute": "سکوت"}),
+        reset_button("captcha", "♻️ بازنشانی تنظیمات کپچا"),
         row(home()),
     ])
     return text, keyboard
@@ -494,6 +512,7 @@ def _panel_antispam(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         [btn("📣 منشن اسپم (۰ = خاموش):", cb("noop"))],
         number_buttons("منشن", "mention_spam_limit", int(settings.get("mention_spam_limit") or 0),
                        panel, step=1, minimum=0, maximum=30),
+        reset_button("antispam", "♻️ بازنشانی تنظیمات ضداسپم"),
         row(home()),
     ])
     return text, keyboard
@@ -528,6 +547,7 @@ def _panel_raid(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
                        bool(settings.get("antiraid_lock_new")), panel),
          toggle_button("🤖 اجبار کپچا", "antiraid_force_captcha",
                        bool(settings.get("antiraid_force_captcha")), panel)],
+        reset_button("raid", "♻️ بازنشانی تنظیمات ضد Raid"),
         row(home()),
     ])
     return text, keyboard
@@ -541,8 +561,10 @@ def _panel_night(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         "🌙 <b>حالت شب</b>",
         "",
         state_text("وضعیت", bool(settings.get("night_mode_enabled"))),
-        f"⏰ بازه: {settings.get('night_start', '01:00')} تا {settings.get('night_end', '06:00')}",
+        f"⏰ بازه: {to_persian_digits(settings.get('night_start', '01:00'))} تا "
+        f"{to_persian_digits(settings.get('night_end', '06:00'))}",
         f"🎯 اقدام: {PUNISHMENT_OPTIONS_FA.get(action, action)}",
+        "🔓 سکوت/بن/اخراجِ شبانه فقط تا پایان بازه است و سپس خودکار آزاد می‌شود.",
         "",
         "برای تغییر ساعت:",
         "• <code>حالت شب شروع ۲۳:۳۰</code>",
@@ -555,6 +577,7 @@ def _panel_night(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
                          options={"mute": "سکوت", "delete": "حذف پیام", "kick": "اخراج",
                                   "ban": "بن", "none": "فقط هشدار"}),
         [primary("⏰ راهنمای تنظیم ساعت", cb("cmd", "nighthelp"))],
+        reset_button("night", "♻️ بازنشانی حالت شب"),
         row(home()),
     ])
     return text, keyboard
@@ -578,17 +601,11 @@ def _panel_messages(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         [primary("🧹 پاکسازی ۱۰۰", cb("cmd", "purge100")), danger("🧹 حذف همه پین‌ها", cb("conf", "unpinall", "all"))],
         [primary("📜 قوانین", cb("panel", "rules"))],
     ]
-    if int(ctx.get("level", 0)) >= level_of("admin"):
-        raw_delay = settings.get("report_delete_after")
-        delay = 12 if raw_delay is None else int(raw_delay)
-        text_lines.extend([
-            "",
-            f"⏱ حذف خودکار گزارش‌های پایان ارسال همگانی و اسکن حساب‌های حذف‌شده: "
-            f"{to_persian_digits(str(delay))} ثانیه (۰ = خاموش).",
-            "این مقدار فقط برای همین گروه است.",
-        ])
-        rows.append(number_buttons("ثانیه", "report_delete_after", delay, "messages",
-                                   step=1, minimum=0, maximum=600))
+    text_lines.extend([
+        "",
+        "⏱ همهٔ پیام‌های عادی ربات در گروه پس از ۳۰ ثانیه پاک می‌شوند؛ پنل مدیریتی باقی می‌ماند.",
+        "گزارش‌های خصوصیِ بن در پی‌وی مالک و روت‌های مجاز باقی می‌مانند.",
+    ])
     rows.append(row(home()))
     return "\n".join(text_lines), markup(rows)
 
@@ -608,6 +625,7 @@ def _panel_rules(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     keyboard = markup([
         [primary("📜 مشاهده قوانین", cb("cmd", "rules"))],
         [primary("✏️ ویرایش قوانین", cb("cmd", "setrules")), danger("🗑 حذف قوانین", cb("conf", "delrules", "all"))],
+        reset_button("rules", "♻️ بازگشت قوانین به پیش‌فرض"),
         row(home()),
     ])
     return text, keyboard
@@ -734,6 +752,92 @@ def _panel_fun(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     return text, keyboard
 
 
+def _panel_ai_chat(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
+    import html
+    import math
+
+    from ..services.ai_gateway import model_ref
+
+    settings = ctx.get("settings") or {}
+    selected = str(settings.get("ai_chat_model") or "")
+    models = list(ctx.get("ai_models") or [])
+    error = ctx.get("ai_models_error")
+    page_size = 6
+    page_count = max(1, math.ceil(len(models) / page_size))
+    try:
+        page = max(0, min(int(ctx.get("ai_model_page", 0)), page_count - 1))
+    except (TypeError, ValueError):
+        page = 0
+
+    current_model = next((model for model in models if model.id == selected), None)
+    lines = ["💬 <b>گفت‌وگوی هوشمند گروه/کانال</b>", ""]
+    if selected:
+        current_name = current_model.name if current_model else selected
+        lines.extend([
+            f"مدل فعلی: <b>{html.escape(str(current_name))}</b>",
+            f"شناسهٔ مدل: <code>{html.escape(selected)}</code>",
+        ])
+    else:
+        lines.append("مدلی برای این گروه انتخاب نشده است.")
+
+    lines.extend([
+        "",
+        "شروع: در گروه یا کانال پیام را با «آرماندو» آغاز کنید؛ نمونه: <code>آرماندو خلاصهٔ گفتگو را بگو</code>",
+        "ادامه: روی پاسخ آرماندو ریپلای کنید و پرسش بعدی را بنویسید؛ گفت‌وگو در همان چت مشترک است.",
+        "مدیران برای هر گروه/کانال، مدل را جداگانه از فهرست زندهٔ API انتخاب می‌کنند.",
+        state_text("حافظهٔ ۷روزهٔ گفتگو", bool(settings.get("ai_agent_enabled"))),
+        "با فعال‌بودن حافظه، متن و کپشن پیام‌هایی که تلگرام به ربات می‌رساند تا ۷ روز نگهداری و سپس خودکار پاک می‌شوند.",
+        "آرماندو فقط می‌خواند و در پاسخ به درخواست، پاسخ می‌سازد؛ بن، سکوت، حذف پیام یا تغییر تنظیمات انجام نمی‌دهد. پیام‌های پیش از افزودن ربات یا خارج از دسترسی تلگرام دیده نمی‌شوند.",
+        "⚠️ رسانه‌ها به‌صورت نوع پیام/کپشن در حافظه می‌آیند؛ صدای ویس رونویسی نمی‌شود.",
+    ])
+
+    if error == "not_configured":
+        lines.extend(["", "⛔️ مدیر ربات باید <code>AI_CHAT_BASE_URL</code> و <code>AI_CHAT_API_KEY</code> را در Railway تنظیم کند؛ مقدار کلید را Secret بگذارد."])
+    elif error:
+        lines.extend(["", "⚠️ فهرست مدل‌ها از ارائه‌دهندهٔ API دریافت نشد. کلید و دسترسی API را در Railway بررسی و سپس تازه‌سازی کنید."])
+    elif models:
+        lines.extend(["", f"<b>مدل‌های در دسترس ({len(models)}):</b>"])
+        start = page * page_size
+        for model in models[start:start + page_size]:
+            marker = "✅" if model.id == selected else "•"
+            lines.append(
+                f"{marker} <b>{html.escape(str(model.name)[:80])}</b>\n"
+                f"   <code>{html.escape(str(model.id)[:180])}</code>"
+            )
+        lines.append(f"صفحهٔ {to_persian_digits(str(page + 1))} از {to_persian_digits(str(page_count))}")
+    else:
+        lines.extend(["", "در فهرست زنده مدلی برای نمایش نیست."])
+
+    rows: list[list[Any]] = []
+    if models:
+        start = page * page_size
+        model_buttons = []
+        for model in models[start:start + page_size]:
+            name = str(model.name).strip() or model.id
+            if len(name) > 34:
+                name = name[:33].rstrip() + "…"
+            prefix = "✅ " if model.id == selected else "• "
+            model_buttons.append(primary(prefix + name, cb("aimodel", "pick", model_ref(model.id))))
+        rows.extend(grid(model_buttons, per_row=1))
+        pagination = []
+        if page > 0:
+            pagination.append(primary("⬅️ مدل‌های قبلی", cb("aimodel", "page", page - 1)))
+        if page + 1 < page_count:
+            pagination.append(primary("مدل‌های بعدی ➡️", cb("aimodel", "page", page + 1)))
+        if pagination:
+            rows.append(pagination)
+
+    rows.append([primary("🔄 تازه‌سازی فهرست مدل‌ها", cb("aimodel", "refresh"))])
+    if selected:
+        rows.append([toggle_button("🧠 حافظهٔ گفتگو (۷ روز)", "ai_agent_enabled",
+                                   bool(settings.get("ai_agent_enabled")), "ai_chat")])
+        rows.append([danger("🧹 پاک‌کردن حافظهٔ این چت", cb("aimemory", "ask_clear"))])
+        rows.append([danger("⏹ خاموش کردن گفت‌وگوی گروه", cb("aimodel", "off"))])
+    rows.append([danger("♻️ بازگشت AI به پیش‌فرض", cb("reset", "ask", "ai"))])
+    rows.append([primary("⬅️ بازگشت به تنظیمات", cb("panel", "settings")), home()])
+    return "\n".join(lines), markup(rows)
+
+
 def _panel_settings(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     level = ctx.get("level", 0)
     text = "\n".join([
@@ -752,7 +856,7 @@ def _panel_settings(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     buttons.append(primary("📢 گزارش‌ها", cb("panel", "reports")))
     rows = grid(buttons, per_row=2)
     rows.append([primary("💾 پشتیبان‌گیری", cb("panel", "backup"))])
-    rows.append([danger("♻️ بازنشانی تنظیمات", cb("conf", "resetsettings", "all"))])
+    rows.append([primary("♻️ بازنشانی بخش‌به‌بخش", cb("resetmenu", "open"))])
     rows.append(row(home()))
     return text, markup(rows)
 
@@ -775,6 +879,7 @@ def _panel_reports(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
          toggle_button("🔔 اطلاع به مدیران", "report_notify_admins",
                        bool(settings.get("report_notify_admins")), "reports")],
         [primary("📋 گزارش‌های باز", cb("cmd", "openreports"))],
+        reset_button("reports", "♻️ بازنشانی تنظیمات گزارش"),
         row(home()),
     ])
     return text, keyboard
@@ -812,6 +917,7 @@ def _panel_trust(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     keyboard = markup([
         [primary("📋 لیست ویژه‌ها", cb("cmd", "trustedlist")), primary("➕ افزودن ویژه", cb("cmd", "addtrusted"))],
         [primary("➖ عزل ویژه", cb("cmd", "rmtrusted"))],
+        reset_button("trust", "♻️ بازنشانی تنظیمات ویژه‌ها"),
         row(home()),
     ])
     return "\n".join(lines), keyboard
@@ -836,6 +942,7 @@ def _panel_tags(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         [primary("🗑 حذف تگ نمایشی", cb("cmd", "deltag"))],
         [primary("🚫 حذف از تگ همه", cb("cmd", "tagexclude")),
          success("✅ افزودن به تگ همه", cb("cmd", "tagrestore"))],
+        reset_button("tags", "♻️ بازنشانی تنظیمات تگ"),
         row(home()),
     ])
     return "\n".join(lines), keyboard
@@ -857,6 +964,7 @@ def _panel_logs(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         [toggle_button("📜 ثبت لاگ", "log_enabled", bool(settings.get("log_enabled")), "logs")],
         [primary("⚙️ تنظیم کانال لاگ", cb("cmd", "setlog"))],
         [primary("📜 تاریخچه کاربر", cb("cmd", "history"))],
+        reset_button("logs", "♻️ بازنشانی تنظیمات لاگ"),
         row(home()),
     ])
     return text, keyboard
@@ -933,6 +1041,7 @@ def _panel_disabled(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     buttons = [onoff(f"{label}  {state_icon(key not in disabled)}", key not in disabled,
                      cb("dis", key)) for key, label in DISABLEABLE.items()]
     rows = grid(buttons, per_row=2)
+    rows.append(reset_button("disabled", "♻️ فعال‌سازی دوبارهٔ همهٔ بخش‌ها"))
     rows.append(row(home()))
     return "\n".join(lines), markup(rows)
 
@@ -1010,6 +1119,7 @@ PANEL_BUILDERS: dict[str, Callable[[dict], tuple[str, InlineKeyboardMarkup]]] = 
     "members": _panel_members,
     "fun": _panel_fun,
     "settings": _panel_settings,
+    "ai_chat": _panel_ai_chat,
     "help": _panel_help,
     "profile": _panel_profile,
     "warnings": _panel_warnings,
@@ -1049,6 +1159,7 @@ def help_text(topic: str) -> str:
             "• فقط فرمان دقیق با هدف معتبر اجرا می‌شود؛ جمله‌هایی مثل «بن ات می‌کنم» فرمان نیستند.",
             "• <code>تعداد اخطار ۴</code> / <code>وضعیت اخطار</code> / <code>تاریخچه</code>",
             "• <code>لیست بن</code> / <code>لیست سکوت</code> / <code>اطلاعات کاربر</code>",
+            "• مولتی‌بن: روی فهرستِ هر خط یک شناسهٔ عددی یا <code>@username</code> ریپلای کنید و <code>مولتی بن</code> بفرستید؛ پس از پیش‌نمایش، «تأیید» را بزنید یا «لغو» کنید.",
         ]),
         "locks": "\n".join([
             "🔒 <b>قفل‌ها</b>", "",
@@ -1064,6 +1175,8 @@ def help_text(topic: str) -> str:
             "• <code>قفل گروه</code> / <code>قفل گروه رسانه</code> / <code>باز کردن گروه</code>",
             "• <code>قفل خروج</code> (بن خودکار هرکس خارج شود)",
             "• <code>بن خروج سریع ۱۰</code> (بنِ خروجِ بلافاصله پس از ورود)",
+            "• هر بن موفق، مستقل از قفل خروج، با جزئیات کامل به پی‌وی مالک بات و دارندگان روت همان گروه می‌رود؛ همهٔ پیام‌های ربات در گروه پس از ۳۰ ثانیه پاک می‌شوند.",
+            "• گزینهٔ «گزارش خروج بدون بن» فقط گزارش خصوصیِ خروج‌هایی را کنترل می‌کند که به بن منجر نشده‌اند.",
             "• <code>وضعیت قفل گروه</code>",
             "• برای مشاهده همه قفل‌ها: <code>لیست قفل‌ها</code> یا پنل «🔒 قفل‌ها»",
         ]),
@@ -1151,7 +1264,7 @@ def help_text(topic: str) -> str:
             "• <code>تنظیم عنوان نام جدید</code> / <code>تنظیم توضیحات متن</code>",
             "• <code>بکاپ</code> / <code>آیدی</code> / <code>تاریخ</code> / <code>ساعت</code>",
             "• ارسال پیوند مستقلِ پست/ریل عمومی اینستاگرام برای دریافت رسانه.",
-            "• <code>آرماندو بگو پرسش</code> — گفت‌وگوی Gemini، در صورت فعال‌سازی مالک ربات.",
+            "• <code>آرماندو پرسش</code> — گفت‌وگوی هوشمند گروهی؛ ادامه با ریپلای به پاسخ آرماندو.",
         ]),
         "owner": "\n".join([
             "🌍 <b>دستورهای مالک ربات</b>", "",
@@ -1183,7 +1296,6 @@ def confirm_text(action: str) -> str:
         "clearlocks": "⚠️ آیا مطمئن هستید؟ تمام قفل‌ها غیرفعال می‌شوند.",
         "unpinall": "⚠️ آیا مطمئن هستید؟ تمام پیام‌های پین‌شده حذف می‌شوند.",
         "delrules": "⚠️ آیا مطمئن هستید؟ متن قوانین حذف می‌شود.",
-        "resetsettings": "⚠️ آیا مطمئن هستید؟ تنظیمات گروه به حالت پیش‌فرض بازمی‌گردد.",
         "clearschedule": "⚠️ آیا مطمئن هستید؟ تمام پیام‌های زمان‌بندی‌شده حذف می‌شوند.",
         "fedleave": "⚠️ آیا مطمئن هستید؟ گروه از فدراسیون خارج می‌شود.",
         "ban": "⚠️ آیا از بن کردن این کاربر مطمئن هستید؟",

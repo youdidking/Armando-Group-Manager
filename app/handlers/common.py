@@ -12,6 +12,7 @@ from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.errors import safe_delete, safe_send
+from ..core.message_lifecycle import GROUP_BOT_MESSAGE_TTL
 from ..core.normalization import normalize_text
 from ..db.models import User
 from ..keyboards.factory import InlineKeyboardMarkup, cb, markup, primary, row
@@ -64,6 +65,8 @@ class CommandContext:
         if reply_to:
             kwargs["reply_to_message_id"] = self.message.message_id
         message = await safe_send(self.bot, self.chat_id, text, **kwargs)
+        if self.is_group and delete_after > 0:
+            delete_after = GROUP_BOT_MESSAGE_TTL
         if message is not None and delete_after > 0:
             import asyncio
 

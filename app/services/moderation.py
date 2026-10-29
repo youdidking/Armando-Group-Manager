@@ -200,13 +200,16 @@ async def ban_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Acto
                   target_id: int, target_name: str = "", duration: int | None = None,
                   reason: str = "", delete_message_id: int | None = None,
                   chat_title: str = "", source: str = "command") -> str:
-    if source in {"command", "panel"}:
+    if source in {"command", "panel", "multi_ban"}:
         denied = await _manual_action_error(bot, session, chat_id=chat_id,
                                             actor=actor, target_id=target_id)
         if denied:
             return denied
     until = datetime.utcnow() + timedelta(seconds=duration) if duration else None
     ok = await safe_ban(bot, chat_id, target_id, until_date=until, context="ban")
+    if not ok:
+        # Never create an active ban record when Telegram rejected the ban.
+        return "⚠️ عملیات در تلگرام انجام نشد (احتمالاً دسترسی ربات ناکافی است)."
 
     action = "temp_ban" if duration else "ban"
     await record_action(session, chat_id=chat_id, action=action, target_id=target_id,
@@ -230,8 +233,16 @@ async def ban_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Acto
         chat_title=chat_title, reason=reason,
         duration=format_duration(duration) if duration else "",
     )
-    if not ok:
-        return "⚠️ عملیات در تلگرام انجام نشد (احتمالاً دسترسی ربات ناکافی است)."
+    from .ban_reports import report_successful_ban
+
+    await report_successful_ban(
+        bot, session, chat_id=chat_id, target_id=target_id,
+        actor_id=actor.user_id, reason=reason, duration=duration, source=source,
+        chat_title=chat_title,
+        target_name=target_name or await _display_name(session, target_id),
+        actor_name=await _display_name(session, actor.user_id),
+        action=action,
+    )
     text = (f"🔨 کاربر {mention(target_id, target_name or await _display_name(session, target_id))} "
             f"{'به‌مدت ' + format_duration(duration) + ' ' if duration else ''}بن شد.")
     if reason:
@@ -311,17 +322,26 @@ async def kick_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Act
         if denied:
             return denied
     ok = await safe_ban(bot, chat_id, target_id, context="kick")
+    if not ok:
+        return "⚠️ اخراج در تلگرام انجام نشد (احتمالاً دسترسی ربات ناکافی است)."
+    unbanned = True
     if sticky:
         # The ban stays: Telegram then blocks every re-entry attempt.
         session.add(BanRecord(chat_id=chat_id, user_id=target_id, banned_by=actor.user_id,
                               reason=(reason or "")[:500], scope="chat", active=True,
                               until=None, created_at=datetime.utcnow()))
     else:
-        await safe_unban(bot, chat_id, target_id, only_if_banned=False, context="kick_unban")
+        unbanned = await safe_unban(bot, chat_id, target_id,
+                                    only_if_banned=False, context="kick_unban")
+        if not unbanned:
+            # The user was removed but Telegram did not lift the ban.
+            session.add(BanRecord(chat_id=chat_id, user_id=target_id, banned_by=actor.user_id,
+                                  reason=(reason or "")[:500], scope="chat", active=True,
+                                  until=None, created_at=datetime.utcnow()))
     await record_action(session, chat_id=chat_id, action="kick", target_id=target_id,
                         actor_id=actor.user_id, reason=reason, source=source)
     state = await get_member_state(session, chat_id, target_id)
-    state.status = "left"
+    state.status = "kicked" if (sticky or not unbanned) else "left"
     state.updated_at = datetime.utcnow()
     invalidate_member(chat_id, target_id)
     if delete_message_id:
@@ -332,13 +352,22 @@ async def kick_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Act
         target_name=mention(target_id, target_name or await _display_name(session, target_id)),
         chat_title=chat_title, reason=reason,
     )
-    if not ok:
-        return "⚠️ عملیات در تلگرام انجام نشد (احتمالاً دسترسی ربات ناکافی است)."
+    if sticky or not unbanned:
+        from .ban_reports import report_successful_ban
+
+        await report_successful_ban(
+            bot, session, chat_id=chat_id, target_id=target_id,
+            actor_id=actor.user_id, reason=reason, source=source,
+            chat_title=chat_title,
+            target_name=target_name or await _display_name(session, target_id),
+            actor_name=await _display_name(session, actor.user_id), action="kick")
     who = mention(target_id, target_name or await _display_name(session, target_id))
     if sticky:
         return (f"👢 کاربر {who} از گروه اخراج شد و بن ماندگار شد.\n"
                 "🔒 در سوپرگروه، تلگرام تا رفع‌بن توسط مدیر جلوی ورود دوباره با لینک را می‌گیرد؛ "
                 "در گروه معمولی این تضمین وجود ندارد.")
+    if not unbanned:
+        return f"⚠️ کاربر {who} اخراج شد، اما تلگرام رفع بن را نپذیرفت؛ او همچنان بن است."
     return (f"👢 کاربر {who} از گروه اخراج شد.")
 
 
@@ -364,6 +393,12 @@ async def enforce_sticky_ban(bot: Bot, session: AsyncSession, chat_id: int,
     removed = await safe_ban(bot, chat_id, user_id, context="sticky_reban")
     if removed:
         logger.info("sticky ban re-applied user=%s chat=%s", user_id, chat_id)
+        from .ban_reports import report_successful_ban
+
+        await report_successful_ban(
+            bot, session, chat_id=chat_id, target_id=user_id, actor_id=bot.id,
+            reason=record.reason or "اجرای دوبارهٔ بن فعال", source="sticky_reban",
+            target_name=await _display_name(session, user_id))
     return bool(removed)
 
 

@@ -175,11 +175,23 @@ async def fban(session: AsyncSession, bot: Bot, fed: Federation, *, user_id: int
             ok = await safe_ban(bot, chat_id, user_id, until_date=until, context="fban_enforce")
             if ok:
                 applied += 1
+                federation_reason = f"[فدراسیون {fed.name}] {reason or ''}"[:500]
                 session.add(ModerationAction(
                     chat_id=chat_id, target_id=user_id, actor_id=banned_by, action="ban",
-                    reason=f"[فدراسیون {fed.name}] {reason or ''}"[:500], duration=duration,
+                    reason=federation_reason, duration=duration,
                     expires_at=until, active=True, source="federation",
                     created_at=datetime.utcnow()))
+                try:
+                    from .ban_reports import report_successful_ban
+
+                    await report_successful_ban(
+                        bot, session, chat_id=chat_id, target_id=user_id,
+                        actor_id=banned_by, reason=federation_reason,
+                        duration=duration, source="federation",
+                        action="temp_ban" if duration else "ban")
+                except Exception as exc:  # noqa: BLE001 - continue enforcing other chats
+                    logger.warning("federation-ban report failed chat=%s (%s)",
+                                   chat_id, exc.__class__.__name__)
     await session.flush()
     return applied
 

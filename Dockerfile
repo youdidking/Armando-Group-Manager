@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tzdata curl \
+ && apt-get install -y --no-install-recommends tzdata curl ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 # Asia/Tehran is the bot default timezone

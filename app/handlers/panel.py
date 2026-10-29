@@ -7,25 +7,35 @@ Telegram and checks both the internal role and the real Telegram capability.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
 from aiogram.types import (CallbackQuery, ChatMemberAdministrator, ChatMemberOwner,
                            Message)
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core import cache
 from ..core.errors import (safe_answer, safe_call, safe_delete, safe_edit,
                            safe_edit_markup, schedule_delete)
 from ..core.normalization import to_persian_digits
+from ..core.message_lifecycle import (
+    GROUP_BOT_MESSAGE_TTL,
+    is_management_panel_markup,
+    is_panel_message,
+    panel_message_context,
+    remember_panel_message,
+)
 from ..db.models import (
     BotRole,
     Chat,
     ChatMemberState,
     Federation,
     FilterRule,
+    GroupMessageMemory,
+    Lock,
     ModerationAction,
     Note,
     PersonalCommand,
@@ -34,7 +44,7 @@ from ..db.models import (
     TrustedUser,
     Warning,
 )
-from ..keyboards.factory import cb, confirm, markup, parse_cb, primary, row
+from ..keyboards.factory import cb, confirm, danger, markup, parse_cb, primary, row
 from ..keyboards.menus import (
     BOT_NAME,
     ROLE_LABELS,
@@ -57,6 +67,78 @@ from ..services.roles import level_of
 
 router = Router(name="panel")
 logger = logging.getLogger("armando.panel")
+
+# Only configuration sections appear here. Every reset is isolated, confirmed,
+# and leaves historical records (warnings, bans, filters, tags, reports) intact
+# unless the specific setting being reset is itself the custom text/config.
+RESET_SECTIONS: dict[str, tuple[str, str, str]] = {
+    "security": ("security", "🔐 امنیت و ضداسپم",
+                 "تنظیمات ضداسپم، ضدفلاود، ضد Raid، کپچا، فحاشی/پورن، تحلیل هوشمند و حالت شب به مقادیر پیش‌فرض برمی‌گردند؛ سوابق کاربران پاک نمی‌شوند."),
+    "locks": ("locks", "🔒 قفل‌ها و خروج",
+              "قفل‌های محتوایی خاموش، قفل تلگرام گروه باز، و تنظیمات قفل خروج پیش‌فرض می‌شوند. بن‌های موجود و سوابق تغییر نمی‌کنند."),
+    "filters": ("filters", "📝 پیش‌فرض فیلتر",
+                "فقط حالت و برخورد پیش‌فرض فیلتر بازنشانی می‌شود؛ فیلترها، یادداشت‌ها و پاسخ‌های ذخیره‌شده باقی می‌مانند."),
+    "welcome": ("welcome", "👋 ورود و خروج",
+                "متن خوشامد/خداحافظی، رسانه‌ها، دکمه‌ها و پاک‌سازی پیام‌های سرویسی به پیش‌فرض برمی‌گردند."),
+    "warnings": ("warnings", "⚠️ تنظیمات اخطار",
+                  "سقف، نوع و مدت اقدام و انقضای اخطار به پیش‌فرض برمی‌گردد؛ اخطارهای ثبت‌شده پاک نمی‌شوند."),
+    "captcha": ("captcha", "🤖 کپچا",
+                 "وضعیت و نوع چالش، مهلت، تعداد تلاش و اقدام پس از شکست به پیش‌فرض برمی‌گردند."),
+    "antispam": ("antispam", "🚫 ضداسپم و ضدفلاود",
+                  "فعال‌سازی، آستانه‌ها و نوع برخورد ضداسپم/ضدفلاود به پیش‌فرض برمی‌گردد."),
+    "raid": ("raid", "🛡 ضد Raid",
+             "آستانه، پنجره، اقدام و محدودسازی اعضای جدید به پیش‌فرض برمی‌گردد و وضعیت Raid فعلی لغو می‌شود."),
+    "night": ("night", "🌙 حالت شب",
+              "حالت شب، بازهٔ زمانی، اقدام و استثناهای آن به پیش‌فرض برمی‌گردند."),
+    "ai": ("ai_chat", "💬 گفت‌وگوی هوشمند",
+           "مدل و حافظهٔ ۷روزهٔ این گفتگو خاموش و حافظهٔ ذخیره‌شده و threadهای موقت پاک می‌شوند."),
+    "rules": ("rules", "📜 قوانین",
+              "متن سفارشی قوانین پاک و نمایش قوانین به حالت پیش‌فرض برمی‌گردد."),
+    "reports": ("reports", "📢 گزارش‌ها",
+                 "دریافت گزارش و اطلاع‌رسانی آن به پیش‌فرض برمی‌گردد؛ گزارش‌های ثبت‌شده باقی می‌مانند."),
+    "trust": ("trust", "⭐️ کاربران ویژه",
+              "استثناهای پیش‌فرض کاربران ویژه پاک می‌شود؛ عضویت کاربران ویژه و سوابق آن‌ها باقی می‌ماند."),
+    "tags": ("tags", "🏷 تگ‌ها",
+             "فقط اجازهٔ ویرایش خودکار تگ توسط اعضا به پیش‌فرض برمی‌گردد؛ تگ‌های موجود حذف نمی‌شوند."),
+    "logs": ("logs", "📜 لاگ‌ها",
+             "ثبت لاگ به پیش‌فرض برمی‌گردد و مقصد لاگ پاک می‌شود؛ پیام‌های قبلی حذف نمی‌شوند."),
+    "disabled": ("disabled", "🚫 بخش‌های غیرفعال",
+                 "همهٔ بخش‌ها و دستورهای قابل‌غیرفعال‌سازی دوباره فعال می‌شوند."),
+}
+
+RESET_DEFAULTS: dict[str, dict[str, object]] = {
+    "warnings": {"warn_limit": 4, "warn_action": "mute", "warn_action_duration": None,
+                 "warn_expire_days": 0, "warn_notify_user": True},
+    "antispam": {"antispam_enabled": True, "antiflood_enabled": True,
+                 "antiflood_count": 5, "antiflood_window": 3, "antiflood_action": "mute",
+                 "antiflood_duration": None, "antispam_same_limit": 0,
+                 "antispam_same_action": "warn", "mention_spam_limit": 0,
+                 "mention_spam_action": "mute", "forward_spam_action": "none"},
+    "captcha": {"captcha_enabled": False, "captcha_mode": "button", "captcha_timeout": 120,
+                "captcha_max_attempts": 3, "captcha_fail_action": "kick",
+                "captcha_delete_after": True},
+    "raid": {"antiraid_enabled": False, "antiraid_threshold": 8,
+             "antiraid_window": 60, "antiraid_action": "kick", "antiraid_lock_new": True,
+             "antiraid_force_captcha": True, "raid_mode_until": None},
+    "night": {"night_mode_enabled": False, "night_start": "01:00", "night_end": "06:00",
+              "night_action": "mute", "night_bypass_roles": None},
+    "filters": {"filter_default_action": "delete", "filter_default_mode": "word"},
+    "rules": {"rules_text": "", "rules_enabled": True},
+    "reports": {"report_enabled": True, "report_notify_admins": True,
+                 "report_delete_after": 30},
+    "trust": {"trust_bypass": None},
+    "tags": {"tag_allow_user_edit": False},
+    "logs": {"log_enabled": True, "log_chat_id": None},
+    "disabled": {"disabled_commands": None},
+}
+
+_SECURITY_DEFAULTS = {
+    **RESET_DEFAULTS["antispam"], **RESET_DEFAULTS["captcha"], **RESET_DEFAULTS["raid"],
+    **RESET_DEFAULTS["night"],
+    "anti_profanity_enabled": True, "anti_profanity_action": "delete_warn",
+    "anti_porn_enabled": False, "anti_porn_action": "delete_ban",
+    "anti_porn_strictness": 2, "ai_enabled": False, "ai_threshold": 0.75,
+}
 
 COMMAND_HINTS: dict[str, str] = {
     "ban": "🔨 برای بن کردن، روی پیام کاربر <b>ریپلای</b> کنید و بنویسید:\n<code>بن</code> یا <code>بن ۲روز تبلیغ</code>",
@@ -151,6 +233,22 @@ async def _prepare_ctx(session: AsyncSession, bot: Bot, chat_id: int, user_id: i
         "role_label": ROLE_LABELS.get(_role_key(actor), "👤 عضو") if actor else "👤 عضو",
         **extra,
     }
+    if section == "ai_chat":
+        from ..services.ai_gateway import (
+            AIGatewayError,
+            AIGatewayNotConfigured,
+            list_models,
+        )
+
+        try:
+            ctx["ai_models"] = await list_models()
+            ctx["ai_models_error"] = None
+        except AIGatewayNotConfigured:
+            ctx["ai_models"] = []
+            ctx["ai_models_error"] = "not_configured"
+        except AIGatewayError:
+            ctx["ai_models"] = []
+            ctx["ai_models_error"] = "unavailable"
     if section in {"locks", "lock", "security"}:
         ctx["locks"] = await lock_service.get_locks_map(session, chat_id)
     if section == "lock":
@@ -316,18 +414,21 @@ async def send_panel(bot: Bot, chat_id: int, user_id: int, session: AsyncSession
     ctx = await _prepare_ctx(session, bot, target_chat_id, user_id, actor, settings, section,
                              chat_title=(chat.title if chat else ""), chat_type="group", **extra)
     text, keyboard = build_panel(section, ctx)
-    sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard,
-                                  parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    # Initial group panels are explicitly exempt from the global 30-second TTL.
+    with panel_message_context():
+        sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard,
+                                      parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     if sent is not None:
+        remember_panel_message(sent.chat.id, sent.message_id)
         remember_panel_owner(chat_id, sent.message_id, user_id)
 
 
-PANEL_TTL = 24 * 60 * 60  # a day is plenty for an interactive panel
+PANEL_TTL = 24 * 60 * 60  # owner binding only; it does not expire the panel message
 
 
 def remember_panel_owner(chat_id: int, message_id: int, user_id: int) -> None:
     """Bind a panel message to the admin who opened it."""
-    cache.panel_owner_cache.set((chat_id, message_id), int(user_id))
+    cache.panel_owner_cache.set((chat_id, message_id), int(user_id), ttl=PANEL_TTL)
 
 
 def _panel_owner(chat_id: int, message_id: int) -> int | None:
@@ -438,6 +539,248 @@ async def on_panel(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> 
     await _refresh(callback, session, bot, await _panel_chat_id(callback, session), section)
 
 
+@router.callback_query(F.data.startswith("resetmenu:"))
+async def on_reset_menu(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    """Offer independent reset choices; there is deliberately no reset-all action."""
+    parts = parse_cb(callback.data or "")
+    action = parts[1] if len(parts) > 1 else ""
+    if action != "open":
+        await safe_answer(callback)
+        return
+    chat_id = await _panel_chat_id(callback, session)
+    if not await _ensure_admin(callback, bot, chat_id, session):
+        return
+    if callback.message is None:
+        await safe_answer(callback, "⛔️ پیام پنل پیدا نشد.", show_alert=True)
+        return
+    rows = [[primary(f"♻️ {label}", cb("reset", "ask", section))]
+            for section, (_panel, label, _description) in RESET_SECTIONS.items()]
+    rows.append([primary("⬅️ بازگشت به تنظیمات", cb("panel", "settings"))])
+    await safe_answer(callback)
+    await safe_edit(
+        callback.message,
+        "♻️ <b>بازنشانی بخش‌به‌بخش</b>\n\n"
+        "یک بخش را انتخاب کنید. هر بخش جداگانه بازنشانی می‌شود و پیش از اجرا تأیید می‌گیرد؛ "
+        "هیچ دکمه‌ای برای بازنشانی یکجای کل گروه وجود ندارد.",
+        reply_markup=markup(rows), parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data.startswith("reset:"))
+async def on_reset_section(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    parts = parse_cb(callback.data or "")
+    action = parts[1] if len(parts) > 1 else ""
+    section = parts[2] if len(parts) > 2 else ""
+    definition = RESET_SECTIONS.get(section)
+    if definition is None:
+        await safe_answer(callback, "⛔️ بخش بازنشانی معتبر نیست.", show_alert=True)
+        return
+    panel_section, label, description = definition
+    chat_id = await _panel_chat_id(callback, session)
+    if not await _ensure_admin(callback, bot, chat_id, session):
+        return
+    if callback.message is None:
+        await safe_answer(callback, "⛔️ پیام پنل پیدا نشد.", show_alert=True)
+        return
+
+    if action == "ask":
+        await safe_answer(callback)
+        title = (f"⚠️ <b>بازنشانی {label} به پیش‌فرض</b>\n\n"
+                 f"{description}\n\n"
+                 "فقط همین بخش تغییر می‌کند. آیا ادامه می‌دهید؟")
+        await safe_edit(
+            callback.message, title,
+            reply_markup=markup([
+                [danger("♻️ بله، بازنشانی شود", cb("reset", "confirm", section)),
+                 primary("✖️ انصراف", cb("reset", "cancel", section))],
+            ]), parse_mode=ParseMode.HTML)
+        return
+    if action == "cancel":
+        await safe_answer(callback, "عملیات لغو شد.")
+        await _refresh(callback, session, bot, chat_id, panel_section)
+        return
+    if action != "confirm":
+        await safe_answer(callback)
+        return
+
+    settings_obj = await get_settings(session, chat_id)
+    if section == "welcome":
+        from ..services.welcome import DEFAULT_GOODBYE, DEFAULT_WELCOME
+
+        settings_obj.welcome_enabled = True
+        settings_obj.welcome_text = DEFAULT_WELCOME
+        settings_obj.welcome_media = None
+        settings_obj.welcome_buttons = None
+        settings_obj.welcome_delete_after = 0
+        settings_obj.goodbye_enabled = False
+        settings_obj.goodbye_text = DEFAULT_GOODBYE
+        settings_obj.goodbye_media = None
+        settings_obj.goodbye_buttons = None
+        settings_obj.goodbye_delete_after = 0
+        for field in ("clean_join", "clean_leave", "clean_pin", "clean_service",
+                      "clean_channel_post", "clean_voice_chat"):
+            setattr(settings_obj, field, False)
+    elif section == "ai":
+        settings_obj.ai_enabled = False
+        settings_obj.ai_threshold = 0.75
+        settings_obj.ai_chat_model = ""
+        settings_obj.ai_agent_enabled = False
+        await session.execute(delete(GroupMessageMemory).where(
+            GroupMessageMemory.chat_id == chat_id))
+        from ..services.ai_chat import clear_chat_memory
+
+        clear_chat_memory(chat_id)
+    elif section == "locks":
+        from ..services.chatlock import apply_chat_lock
+
+        if not await apply_chat_lock(bot, chat_id, "off"):
+            await safe_answer(callback,
+                              "⚠️ نتوانستم قفل گروه را در تلگرام باز کنم؛ تنظیمات دست‌نخورده ماند.",
+                              show_alert=True)
+            await _refresh(callback, session, bot, chat_id, panel_section)
+            return
+        await session.execute(delete(Lock).where(Lock.chat_id == chat_id))
+        for field, value in {
+            "ban_on_leave": False, "quick_leave_ban": False,
+            "quick_leave_seconds": 10, "leave_notify_owner": False,
+            "sticky_ban": True, "anonymous_sender_exempt": True,
+        }.items():
+            setattr(settings_obj, field, value)
+    else:
+        values = _SECURITY_DEFAULTS if section == "security" else RESET_DEFAULTS.get(section)
+        if values is None:
+            await safe_answer(callback, "⛔️ برای این بخش پیش‌فرضی تعریف نشده است.", show_alert=True)
+            return
+        for field, value in values.items():
+            setattr(settings_obj, field, value)
+
+    if section in {"security", "raid"}:
+        from ..services.antiraid import raid_tracker
+
+        raid_tracker.deactivate(chat_id)
+    settings_obj.updated_at = datetime.utcnow()
+    invalidate_settings(chat_id)
+    await session.flush()
+    await safe_answer(callback, "✅ همین بخش به حالت پیش‌فرض برگشت.")
+    await _refresh(callback, session, bot, chat_id, panel_section)
+
+
+@router.callback_query(F.data.startswith("aimodel:"))
+async def on_ai_model(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    """Live AI model picker; every mutation is restricted to group admins."""
+    from ..services.ai_gateway import (
+        AIGatewayError,
+        AIGatewayNotConfigured,
+        list_models,
+        model_ref,
+    )
+
+    parts = parse_cb(callback.data or "")
+    action = parts[1] if len(parts) > 1 else ""
+    chat_id = await _panel_chat_id(callback, session)
+    if not await _ensure_admin(callback, bot, chat_id, session):
+        return
+
+    if action == "page":
+        try:
+            page = max(0, min(int(parts[2]), 999))
+        except (IndexError, TypeError, ValueError):
+            page = 0
+        await safe_answer(callback)
+        await _refresh(callback, session, bot, chat_id, "ai_chat", ai_model_page=page)
+        return
+
+    if action == "refresh":
+        try:
+            await list_models(force_refresh=True)
+            answer = "✅ فهرست زندهٔ مدل‌ها تازه شد."
+        except AIGatewayNotConfigured:
+            answer = "⛔️ AI_CHAT_BASE_URL و AI_CHAT_API_KEY را در Railway تنظیم کنید."
+        except AIGatewayError:
+            answer = "⚠️ فهرست مدل‌ها دریافت نشد؛ کلید و دسترسی API را بررسی کنید."
+        await safe_answer(callback, answer, show_alert=answer.startswith(("⛔️", "⚠️")))
+        await _refresh(callback, session, bot, chat_id, "ai_chat", ai_model_page=0)
+        return
+
+    if action == "off":
+        settings_obj = await get_settings(session, chat_id)
+        settings_obj.ai_chat_model = ""
+        settings_obj.ai_agent_enabled = False
+        settings_obj.updated_at = datetime.utcnow()
+        invalidate_settings(chat_id)
+        await session.flush()
+        await safe_answer(callback, "✅ گفت‌وگوی هوشمند این گروه خاموش شد.")
+        await _refresh(callback, session, bot, chat_id, "ai_chat")
+        return
+
+    if action == "pick":
+        token = parts[2] if len(parts) > 2 else ""
+        if not re.fullmatch(r"[0-9a-f]{12}", token):
+            await safe_answer(callback, "⛔️ شناسهٔ مدل معتبر نیست؛ فهرست را تازه‌سازی کنید.", show_alert=True)
+            return
+        try:
+            models = await list_models()
+        except AIGatewayNotConfigured:
+            await safe_answer(callback, "⛔️ AI_CHAT_BASE_URL و AI_CHAT_API_KEY را در Railway تنظیم کنید.", show_alert=True)
+            return
+        except AIGatewayError:
+            await safe_answer(callback, "⚠️ فهرست مدل‌ها در دسترس نیست؛ دوباره تازه‌سازی کنید.", show_alert=True)
+            return
+        model = next((item for item in models if model_ref(item.id) == token), None)
+        if model is None:
+            await safe_answer(callback, "⚠️ این مدل دیگر در فهرست زنده نیست؛ فهرست را تازه‌سازی کنید.", show_alert=True)
+            return
+        settings_obj = await get_settings(session, chat_id)
+        settings_obj.ai_chat_model = model.id
+        settings_obj.ai_agent_enabled = True
+        settings_obj.updated_at = datetime.utcnow()
+        invalidate_settings(chat_id)
+        await session.flush()
+        await safe_answer(callback, "✅ مدل برای این گروه انتخاب شد.")
+        await _refresh(callback, session, bot, chat_id, "ai_chat")
+        return
+
+    await safe_answer(callback)
+
+
+@router.callback_query(F.data.startswith("aimemory:"))
+async def on_ai_memory(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    parts = parse_cb(callback.data or "")
+    action = parts[1] if len(parts) > 1 else ""
+    chat_id = await _panel_chat_id(callback, session)
+    if not await _ensure_admin(callback, bot, chat_id, session):
+        return
+    if callback.message is None:
+        await safe_answer(callback, "⛔️ پیام پنل پیدا نشد.", show_alert=True)
+        return
+
+    if action == "ask_clear":
+        await safe_answer(callback)
+        await safe_edit(
+            callback.message,
+            "⚠️ <b>پاک‌کردن حافظهٔ گروه</b>\n\n"
+            "تمام پیام‌های ذخیره‌شدهٔ این گروه برای هوش مصنوعی پاک می‌شوند. "
+            "این کار برگشت‌پذیر نیست. ادامه می‌دهید؟",
+            reply_markup=markup([
+                [danger("🧹 بله، پاک شود", cb("aimemory", "confirm_clear")),
+                 primary("✖️ انصراف", cb("aimemory", "cancel_clear"))],
+            ]))
+        return
+    if action == "cancel_clear":
+        await safe_answer(callback, "عملیات لغو شد.")
+        await _refresh(callback, session, bot, chat_id, "ai_chat")
+        return
+    if action == "confirm_clear":
+        from ..services.ai_memory import clear_group_memory
+        from ..services.ai_chat import clear_chat_memory
+
+        count = await clear_group_memory(session, chat_id)
+        clear_chat_memory(chat_id)
+        await safe_answer(callback, f"✅ {to_persian_digits(str(count))} پیام از حافظه پاک شد.")
+        await _refresh(callback, session, bot, chat_id, "ai_chat")
+        return
+    await safe_answer(callback)
+
+
 @router.callback_query(F.data.startswith("lockpage:"))
 async def on_lock_page(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
     parts = parse_cb(callback.data or "")
@@ -505,6 +848,9 @@ async def on_set(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> No
     chat_id = await _panel_chat_id(callback, session)
     if not await _ensure_admin(callback, bot, chat_id, session):
         return
+    if field == "report_delete_after":
+        await safe_answer(callback, "⏱ پیام‌های عادی گروه پس از ۳۰ ثانیه پاک می‌شوند؛ پنل مدیریتی باقی می‌ماند.", show_alert=True)
+        return
     settings_obj = await get_settings(session, chat_id)
     if not hasattr(settings_obj, field):
         await safe_answer(callback, "⛔️ تنظیم نامعتبر است.", show_alert=True)
@@ -541,6 +887,9 @@ async def on_number(callback: CallbackQuery, session: AsyncSession, bot: Bot) ->
     maximum = int(parts[5]) if len(parts) > 5 else 9999
     chat_id = await _panel_chat_id(callback, session)
     if not await _ensure_admin(callback, bot, chat_id, session):
+        return
+    if field == "report_delete_after":
+        await safe_answer(callback, "⏱ پیام‌های عادی گروه پس از ۳۰ ثانیه پاک می‌شوند؛ پنل مدیریتی باقی می‌ماند.", show_alert=True)
         return
     settings_obj = await get_settings(session, chat_id)
     current = int(getattr(settings_obj, field, 0) or 0)
@@ -645,16 +994,6 @@ async def on_do(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> Non
             count += 1
         await session.flush()
         done = f"🗑 {to_persian_digits(str(count))} زمان‌بندی حذف شد."
-    elif action == "resetsettings":
-        settings_obj = await get_settings(session, chat_id)
-        from ..db.models import ChatSettings
-
-        for column in ChatSettings.__table__.columns:  # type: ignore[attr-defined]
-            if column.name in {"chat_id", "created_at", "updated_at"}:
-                continue
-            setattr(settings_obj, column.name, column.default.arg if column.default else None)
-        invalidate_settings(chat_id)
-        done = "♻️ تنظیمات به حالت پیش‌فرض بازگشت."
     elif action == "fedleave":
         from ..services import federation as fed_service
 
@@ -1130,7 +1469,6 @@ async def on_owner_broadcast(callback: CallbackQuery, session: AsyncSession, bot
     import asyncio
 
     from ..services import owner_access, owner_broadcast
-    from ..core.normalization import to_persian_digits
 
     parts = parse_cb(callback.data or "")
     action = parts[1] if len(parts) > 1 else ""
@@ -1402,8 +1740,7 @@ async def on_owner_broadcast(callback: CallbackQuery, session: AsyncSession, bot
                     raw_delay = getattr(state, "broadcast_report_delete_after", 12)
                     delete_after = 12 if raw_delay is None else int(raw_delay)
                 else:
-                    chat_settings = await get_settings(session, callback.message.chat.id)
-                    delete_after = int(chat_settings.report_delete_after or 0)
+                    delete_after = GROUP_BOT_MESSAGE_TTL
                 schedule_delete(bot, callback.message.chat.id,
                                 callback.message.message_id, delete_after,
                                 context="broadcast_result_autodelete")
@@ -1678,22 +2015,44 @@ async def on_root_access(callback: CallbackQuery, session: AsyncSession, bot: Bo
 
 @router.callback_query.middleware()
 async def panel_owner_middleware(handler, event: CallbackQuery, data: dict):
-    """A panel belongs to the admin who opened it - nobody else may click it.
+    """Keep group panels persistent and bound to the admin who opened them.
 
-    Every panel message is remembered when it is sent; clicking it from another
-    account is refused with an alert instead of silently changing the group.
+    A stale panel whose in-memory owner record was lost on restart is left on
+    screen but disabled; the admin can open a fresh panel. This avoids both a
+    disappearing panel and accidentally granting a stale keyboard to others.
     """
     message = getattr(event, "message", None)
     user = getattr(event, "from_user", None)
     if message is not None and user is not None:
-        owner = _panel_owner(message.chat.id, message.message_id)
-        if owner is not None and owner != user.id:
-            bot = data.get("bot")
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        message_id = getattr(message, "message_id", None)
+        is_group = getattr(chat, "type", None) in {"group", "supergroup"}
+        panel_keyboard = is_management_panel_markup(getattr(message, "reply_markup", None))
+        known_panel = bool(chat_id is not None and message_id is not None
+                           and is_panel_message(chat_id, message_id))
+        group_panel = is_group and (panel_keyboard or known_panel)
+        if group_panel:
+            remember_panel_message(chat_id, message_id)
+
+        owner = _panel_owner(chat_id, message_id) if chat_id is not None and message_id is not None else None
+        bot = data.get("bot")
+        if group_panel and owner is None:
             if bot is not None:
                 await safe_call(
                     lambda: bot.answer_callback_query(
                         callback_query_id=event.id,
-                        text=("\U0001f512 این پنل مخصوص مدیری است که آن را باز کرده است.\n"
+                        text=("⌛ این پنل قدیمی است و برای امنیت غیرفعال مانده؛ "
+                              "در گروه دوباره دستور «پنل» را بزنید."),
+                        show_alert=True),
+                    default=None, context="stale_panel_denied")
+            return None
+        if owner is not None and owner != user.id:
+            if bot is not None:
+                await safe_call(
+                    lambda: bot.answer_callback_query(
+                        callback_query_id=event.id,
+                        text=("🔒 این پنل مخصوص مدیری است که آن را باز کرده است.\n"
                               "برای پنل خودتان در گروه دستور «پنل» را بزنید."),
                         show_alert=True),
                     default=None, context="panel_owner_denied")

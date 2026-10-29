@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import config
@@ -21,13 +21,15 @@ from ..core import ratelimit
 from ..core.errors import safe_restrict, safe_unban
 from ..db import session_scope
 from ..db.models import (
+    BanRecord,
     Chat,
     ChatMemberState,
+    ChatSettings,
     ModerationAction,
     ScheduledMessage,
     Warning,
 )
-from . import antiflood, antiraid, captcha, personal, stats
+from . import antiflood, antiraid, captcha, nightmode, personal, stats
 
 logger = logging.getLogger("armando.scheduler")
 
@@ -76,6 +78,7 @@ class SchedulerService:
         self._deleted_scan_task: asyncio.Task | None = None
         self._deleted_scanner = None
         self._last_snapshot_day: dict[int, str] = {}
+        self._night_window_states: dict[int, bool] = {}
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -93,13 +96,18 @@ class SchedulerService:
             return
         from .deleted_accounts import DeletedAccountScanner
 
-        scanner = DeletedAccountScanner(
-            self.bot, api_id=cfg.telegram_api_id, api_hash=cfg.telegram_api_hash,
-            bot_token=cfg.bot_token, session_path=config.DATA_DIR / "armando-mtproto.session")
+        scanner = None
         try:
+            scanner = DeletedAccountScanner(
+                self.bot, api_id=cfg.telegram_api_id, api_hash=cfg.telegram_api_hash,
+                bot_token=cfg.bot_token,
+                session_path=config.DATA_DIR / "armando-mtproto.session",
+                session_string=cfg.telegram_session_string,
+                max_channel_pages=cfg.deleted_account_max_pages)
             await asyncio.wait_for(scanner.connect(), timeout=25)
         except Exception as exc:  # noqa: BLE001 - MTProto is optional and must not stop the bot
-            await scanner.disconnect()
+            if scanner is not None:
+                await scanner.disconnect()
             logger.warning("اتصال MTProto برقرار نشد؛ اسکن حساب‌های حذف‌شده غیرفعال ماند: %s",
                            exc.__class__.__name__)
             return
@@ -146,8 +154,15 @@ class SchedulerService:
             await self._run_scheduled(session)
             await self._expire_captchas(session)
             await self._expire_restrictions(session)
+            await self._notify_night_transitions(session)
             await self._expire_warnings(session)
             await self._snapshot(session)
+            try:
+                from .ai_memory import purge_expired_memory
+
+                await purge_expired_memory(session)
+            except Exception as exc:  # noqa: BLE001 - memory cleanup must not stop other jobs
+                logger.warning("AI group-memory cleanup failed: %s", exc.__class__.__name__)
         self._cleanup()
 
     # ---------------------------------------------------------------------- jobs
@@ -199,6 +214,18 @@ class SchedulerService:
                 if row.action == "temp_ban":
                     ok = await safe_unban(self.bot, row.chat_id, row.target_id,
                                           only_if_banned=True, context="auto_unban")
+                    if ok:
+                        # Keep the auxiliary ban ledger in sync with the
+                        # successfully expired moderation action.
+                        await session.execute(
+                            update(BanRecord).where(
+                                BanRecord.chat_id == row.chat_id,
+                                BanRecord.user_id == row.target_id,
+                                BanRecord.scope == "chat",
+                                BanRecord.active.is_(True),
+                                BanRecord.until.is_not(None),
+                                BanRecord.until <= now,
+                            ).values(active=False))
                 else:
                     from .moderation import UNMUTE_PERMISSIONS
 
@@ -214,7 +241,7 @@ class SchedulerService:
                     )
                     state = state_result.scalar_one_or_none()
                     if state is not None:
-                        state.status = "member"
+                        state.status = "left" if row.action == "temp_ban" else "member"
                         state.muted_until = None
                         state.restricted_until = None
                     cache.invalidate_user(row.chat_id, row.target_id)
@@ -223,6 +250,35 @@ class SchedulerService:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("expiry of action %s failed: %s", row.id, exc)
         await session.flush()
+
+    async def _notify_night_transitions(self, session: AsyncSession) -> None:
+        """Announce actual start/end edges once per running process."""
+        result = await session.execute(
+            select(Chat, ChatSettings)
+            .join(ChatSettings, ChatSettings.chat_id == Chat.id)
+            .where(Chat.is_active.is_(True))
+        )
+        current_chat_ids: set[int] = set()
+        for chat, settings_obj in result.all():
+            chat_id = int(chat.id)
+            current_chat_ids.add(chat_id)
+            active = nightmode.is_night(settings_obj)
+            previous = self._night_window_states.get(chat_id)
+            self._night_window_states[chat_id] = active
+            if previous is None or previous == active:
+                continue
+            if active:
+                text = "🌙 حالت شب آغاز شد؛ پیام‌های عادی طبق اقدام انتخاب‌شده کنترل می‌شوند."
+            else:
+                text = "🌤️ بازهٔ حالت شب پایان یافت؛ محدودیت‌های زمان‌دار شبانه آزاد می‌شوند."
+            try:
+                await self.bot.send_message(chat_id=chat_id, text=text)
+            except Exception as exc:  # noqa: BLE001 - transition notices are best-effort
+                logger.info("اعلان تغییر حالت شب در چت %s نرسید: %s",
+                            chat_id, exc.__class__.__name__)
+
+        for chat_id in set(self._night_window_states) - current_chat_ids:
+            self._night_window_states.pop(chat_id, None)
 
     async def _expire_warnings(self, session: AsyncSession) -> None:
         now = datetime.utcnow()

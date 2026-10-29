@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.errors import safe_delete
 from ..core.timeutils import parse_hhmm, tehran_now
-from .moderation import apply_action
+from .moderation import PUNISHMENT_OPTIONS_FA, apply_action
 from .permissions import Actor, get_bot_actor
 from .roles import level_of
 
@@ -28,12 +28,12 @@ def window_bounds(start: str, end: str) -> tuple[datetime, datetime] | None:
     end_dt = now.replace(hour=end_hm[0], minute=end_hm[1], second=0, microsecond=0)
     if start_dt == end_dt:
         return None
-    if start_dt <= end_dt:  # same-day window
-        return (start_dt, end_dt) if start_dt <= now <= end_dt else None
-    # window crosses midnight
+    if start_dt < end_dt:  # same-day window; the end is exclusive
+        return (start_dt, end_dt) if start_dt <= now < end_dt else None
+    # window crosses midnight; both intervals also use an exclusive end.
     if now >= start_dt:
         return start_dt, end_dt + timedelta(days=1)
-    if now <= end_dt:
+    if now < end_dt:
         return start_dt - timedelta(days=1), end_dt
     return None
 
@@ -64,21 +64,33 @@ def bypasses(actor: Actor, settings_obj) -> bool:
 
 async def enforce(bot: Bot, session: AsyncSession, *, message, actor: Actor,
                   settings_obj, chat_title: str = "") -> bool:
-    """Restrict a message sent during night mode. Returns True when enforced."""
+    """Apply the configured night action and bound restrictions to the window."""
     if not is_night(settings_obj):
         return False
     if bypasses(actor, settings_obj):
         return False
-    action = getattr(settings_obj, "night_action", "mute") or "mute"
+
+    action = (getattr(settings_obj, "night_action", "mute") or "mute").strip().lower()
+    duration = None
+    if action in {"mute", "temp_mute"}:
+        # The old path passed a duration with action="mute", but apply_action
+        # correctly treats that name as permanent. Use the explicit temporary
+        # action so the scheduler releases the mute at the window boundary.
+        action = "temp_mute"
+        duration = max(1, seconds_until_window_ends(settings_obj))
+    elif action in {"ban", "temp_ban", "kick"}:
+        # Night-only kicks/bans must not strand members after morning.
+        action = "temp_ban"
+        duration = max(1, seconds_until_window_ends(settings_obj))
+
     bot_actor = await get_bot_actor(bot, message.chat.id)
     await apply_action(bot, session, chat_id=message.chat.id,
                        target_id=message.from_user.id if message.from_user else message.chat.id,
-                       actor=bot_actor, action=action,
-                       duration=seconds_until_window_ends(settings_obj) if action.endswith("mute") else None,
+                       actor=bot_actor, action=action, duration=duration,
                        target_name=message.from_user.full_name if message.from_user else "",
                        message_id=message.message_id if action.startswith("delete") else None,
                        chat_title=chat_title, reason="حالت شب", source="nightmode")
-    if not action.startswith("delete"):
+    if action != "none" and not action.startswith("delete"):
         await safe_delete(bot, message.chat.id, message.message_id, context="nightmode_delete")
     return True
 
@@ -88,13 +100,16 @@ def night_status_text(settings_obj) -> str:
 
     state = "🟢 فعال" if getattr(settings_obj, "night_mode_enabled", False) else "🔴 خاموش"
     active = "در حال اجرا" if is_night(settings_obj) else "خارج از بازه"
+    action = getattr(settings_obj, "night_action", "mute") or "mute"
     return "\n".join([
         "🌙 <b>حالت شب</b>",
         "",
         f"وضعیت: {state}",
-        f"⏰ بازه: {settings_obj.night_start} تا {settings_obj.night_end}",
-        f"🎯 اقدام: {settings_obj.night_action}",
+        f"⏰ بازه: {to_persian_digits(settings_obj.night_start)} تا "
+        f"{to_persian_digits(settings_obj.night_end)}",
+        f"🎯 اقدام: {PUNISHMENT_OPTIONS_FA.get(action, action)}",
         f"📌 وضعیت فعلی: {active}",
+        "🔓 محدودیت‌های موقتِ سکوت/بن/اخراج با پایان بازه آزاد می‌شوند.",
     ])
 
 

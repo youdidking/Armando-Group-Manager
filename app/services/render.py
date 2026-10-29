@@ -8,6 +8,7 @@ Placeholders supported in any user-defined text:
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 from typing import Any
@@ -32,24 +33,27 @@ async def build_context(session: AsyncSession, bot: Bot, chat_id: int, user_id: 
                         *, chat_title: str = "", user=None, chat=None,
                         member_count: int | None = None) -> dict[str, Any]:
     from ..db.models import Chat, ChatMemberState, User
-    from .chat_state import get_settings_cached
+
+    def safe(value: Any) -> str:
+        return html.escape(str(value or ""), quote=False)
 
     values: dict[str, Any] = {
         "chat_id": str(chat_id),
-        "chat_name": chat_title or "",
-        "group_name": chat_title or "",
+        "chat_name": safe(chat_title),
+        "group_name": safe(chat_title),
         "bot_username": "",
         "members": to_persian_digits(str(member_count or 0)),
-        "date": persian_date(),
-        "time": persian_time(),
+        "date": safe(persian_date()),
+        "time": safe(persian_time()),
         "year": "", "month": "", "day": "",
-        "first_name": "", "last_name": "", "full_name": "", "username": "",
-        "user_id": str(user_id or ""), "user": "", "mention": "", "role": "", "tag": "",
+        "first_name": "", "last_name": "", "full_name": "",
+        "username": "ندارد", "user_id": str(user_id or ""),
+        "user": "", "mention": "", "role": "", "tag": "",
     }
     try:
         bot_user = await safe_call(lambda: bot.get_me(), default=None, log=False)
         if bot_user is not None:
-            values["bot_username"] = bot_user.username or ""
+            values["bot_username"] = safe(bot_user.username)
     except Exception:  # noqa: BLE001
         pass
     from ..core.timeutils import jalali
@@ -61,42 +65,42 @@ async def build_context(session: AsyncSession, bot: Bot, chat_id: int, user_id: 
     if chat is None:
         chat = await session.get(Chat, chat_id)
     if chat is not None:
-        values["chat_name"] = chat.title or values["chat_name"]
-        values["group_name"] = values["chat_name"]
-        values["members"] = to_persian_digits(str(member_count if member_count is not None else chat.member_count or 0))
+        title = safe(getattr(chat, "title", "") or chat_title)
+        values["chat_name"] = title
+        values["group_name"] = title
+        values["members"] = to_persian_digits(str(
+            member_count if member_count is not None else getattr(chat, "member_count", 0) or 0))
 
     if user_id:
         db_user = await session.get(User, user_id)
-        if db_user is not None:
-            first = db_user.first_name or ""
-            last = db_user.last_name or ""
+        source_user = db_user or user
+        if source_user is not None:
+            first_raw = getattr(source_user, "first_name", "") or ""
+            last_raw = getattr(source_user, "last_name", "") or ""
+            username_raw = getattr(source_user, "username", None)
+            full_raw = f"{first_raw} {last_raw}".strip() or str(user_id)
+            first = safe(first_raw)
             values.update({
                 "first_name": first,
-                "last_name": last,
-                "full_name": f"{first} {last}".strip(),
-                "username": f"@{db_user.username}" if db_user.username else first,
-                "user": f"{first} {last}".strip() or str(user_id),
-                "mention": f'<a href="tg://user?id={user_id}">{(first or str(user_id))}</a>',
+                "last_name": safe(last_raw),
+                "full_name": safe(full_raw),
+                "username": safe("@" + str(username_raw).lstrip("@")) if username_raw else "ندارد",
+                "user": safe(full_raw),
+                "mention": f'<a href="tg://user?id={int(user_id)}">{first or str(user_id)}</a>',
             })
-        elif user is not None:
-            first = getattr(user, "first_name", "") or ""
-            last = getattr(user, "last_name", "") or ""
-            username = getattr(user, "username", None)
+        else:
             values.update({
-                "first_name": first,
-                "last_name": last,
-                "full_name": f"{first} {last}".strip(),
-                "username": f"@{username}" if username else first,
-                "user": f"{first} {last}".strip() or str(user_id),
-                "mention": f'<a href="tg://user?id={user_id}">{(first or str(user_id))}</a>',
+                "first_name": "کاربر", "full_name": f"کاربر {user_id}",
+                "user": f"کاربر {user_id}", "user_id": str(user_id),
+                "mention": f'<a href="tg://user?id={int(user_id)}">کاربر {user_id}</a>',
             })
         result = await session.execute(
             select(ChatMemberState).where(
                 ChatMemberState.chat_id == chat_id, ChatMemberState.user_id == user_id)
         )
         state = result.scalar_one_or_none()
-        values["role"] = role_name_fa(state.bot_role if state else None)
-        values["tag"] = (state.tag if state and state.tag else "")
+        values["role"] = safe(role_name_fa(state.bot_role if state else None))
+        values["tag"] = safe(state.tag if state and state.tag else "")
     return values
 
 

@@ -123,17 +123,7 @@ async def cmd_purge(ctx: CommandContext) -> None:
         result = await purge_service.purge_range(ctx.bot, ctx.chat_id, reply.message_id,
                                                  ctx.message.message_id)
         await ctx.delete_invocation()
-        summary = await ctx.reply(purge_service.purge_summary(result), reply_to=False)
-        if summary is not None:
-            import asyncio
-
-            async def _remove() -> None:
-                await asyncio.sleep(10)
-                from ..core.errors import safe_delete
-
-                await safe_delete(ctx.bot, ctx.chat_id, summary.message_id, context="purge_cleanup")
-
-            asyncio.create_task(_remove())
+        await ctx.reply(purge_service.purge_summary(result), reply_to=False)
         from ..services.moderation import record_action
 
         await record_action(ctx.session, chat_id=ctx.chat_id, action="purge",
@@ -145,17 +135,8 @@ async def cmd_purge(ctx: CommandContext) -> None:
         return
     result = await purge_service.purge_count(ctx.bot, ctx.chat_id, count, ctx.message.message_id)
     await ctx.delete_invocation()
-    summary = await ctx.reply(purge_service.purge_summary(result), reply_to=False)
-    if summary is not None:
-        import asyncio
+    await ctx.reply(purge_service.purge_summary(result), reply_to=False)
 
-        async def _remove() -> None:
-            await asyncio.sleep(10)
-            from ..core.errors import safe_delete
-
-            await safe_delete(ctx.bot, ctx.chat_id, summary.message_id, context="purge_cleanup")
-
-        asyncio.create_task(_remove())
 
 
 # --------------------------------------------------------------------------- #

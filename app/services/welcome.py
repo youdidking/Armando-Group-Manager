@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime
 
@@ -20,18 +19,16 @@ from .render import build_context, send_content
 logger = logging.getLogger("armando.welcome")
 
 DEFAULT_WELCOME = (
-    "🌸 سلام {first_name} عزیز!\n"
-    "به گروه {chat_name} خوش آمدی.\n\n"
-    "📜 لطفاً قوانین را مطالعه کن: /قوانین"
+    "╭─── ༺ خوش‌آمدید ༻ ───╮\n"
+    "🌷 سلام {mention} عزیز!\n\n"
+    "🆔 شناسهٔ شما: <code>{user_id}</code>\n"
+    "🔗 نام کاربری: <code>{username}</code>\n"
+    "💬 گروه: <b>{chat_name}</b>\n"
+    "🗓 زمان ورود: {date}، ساعت {time}\n\n"
+    "📜 لطفاً پیش از گفتگو، قوانین گروه را مطالعه کنید.\n"
+    "╰────────────────────╯"
 )
 DEFAULT_GOODBYE = "👋 {first_name} از گروه رفت. به امید دیدار دوباره."
-
-
-async def _auto_delete(bot: Bot, chat_id: int, message_id: int, delay: int) -> None:
-    if not delay:
-        return
-    await asyncio.sleep(max(1, min(delay, 600)))
-    await safe_delete(bot, chat_id, message_id, context="welcome_autodelete")
 
 
 async def send_welcome(bot: Bot, session: AsyncSession, *, chat_id: int, user,
@@ -53,9 +50,8 @@ async def send_welcome(bot: Bot, session: AsyncSession, *, chat_id: int, user,
         buttons=settings_obj.welcome_buttons,
         context=context,
     )
-    if message is not None and int(settings_obj.welcome_delete_after or 0) > 0:
-        asyncio.create_task(_auto_delete(bot, chat_id, message.message_id,
-                                         int(settings_obj.welcome_delete_after)))
+    # Outgoing group messages receive the application-wide 30-second TTL in
+    # the Bot API request middleware; no second per-welcome timer is needed.
     return message
 
 
@@ -78,9 +74,7 @@ async def send_goodbye(bot: Bot, session: AsyncSession, *, chat_id: int, user,
         buttons=settings_obj.goodbye_buttons,
         context=context,
     )
-    if message is not None and int(settings_obj.goodbye_delete_after or 0) > 0:
-        asyncio.create_task(_auto_delete(bot, chat_id, message.message_id,
-                                         int(settings_obj.goodbye_delete_after)))
+    # The global group TTL also covers goodbye messages.
     return message
 
 
