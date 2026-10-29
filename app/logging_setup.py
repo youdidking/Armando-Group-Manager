@@ -56,7 +56,6 @@ class HumanFormatter(logging.Formatter):
 
 
 def setup_logging(level: str | None = None, *, json_output: bool | None = None) -> None:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
     level_name = (level or settings.log_level or "INFO").upper()
     root = logging.getLogger()
     root.setLevel(level_name)
@@ -72,20 +71,22 @@ def setup_logging(level: str | None = None, *, json_output: bool | None = None) 
     console.addFilter(RedactingFilter())
     root.addHandler(console)
 
-    file_handler = logging.handlers.RotatingFileHandler(
-        LOG_DIR / "armando.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
-    )
-    file_handler.setFormatter(JsonFormatter())
-    file_handler.addFilter(RedactingFilter())
-    root.addHandler(file_handler)
+    if settings.log_file_enabled:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            LOG_DIR / "armando.log", maxBytes=5 * 1024 * 1024,
+            backupCount=5, encoding="utf-8")
+        file_handler.setFormatter(JsonFormatter())
+        file_handler.addFilter(RedactingFilter())
+        root.addHandler(file_handler)
 
-    error_handler = logging.handlers.RotatingFileHandler(
-        LOG_DIR / "errors.log", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
-    )
-    error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(JsonFormatter())
-    error_handler.addFilter(RedactingFilter())
-    root.addHandler(error_handler)
+        error_handler = logging.handlers.RotatingFileHandler(
+            LOG_DIR / "errors.log", maxBytes=2 * 1024 * 1024,
+            backupCount=3, encoding="utf-8")
+        error_handler.setLevel(logging.ERROR)
+        error_handler.setFormatter(JsonFormatter())
+        error_handler.addFilter(RedactingFilter())
+        root.addHandler(error_handler)
 
     # Silence noisy third-party loggers
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)

@@ -186,7 +186,7 @@ async def handle_ai_message(message: Message, bot: Bot, *,
             or not (config.settings.ai_chat_base_url or "").strip()):
         await _quiet_reply(
             bot, message,
-            "⚠️ سرویس گفت‌وگوی هوشمند تنظیم نشده است؛ مدیر ربات باید AI_CHAT_BASE_URL و AI_CHAT_API_KEY را در Railway ثبت کند.",
+            "⚠️ سرویس گفت‌وگوی هوشمند تنظیم نشده است؛ مدیر ربات باید AI_CHAT_BASE_URL و AI_CHAT_API_KEY را در متغیرهای امن میزبان ثبت کند.",
         )
         return True
     if not model:

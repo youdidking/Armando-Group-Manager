@@ -41,13 +41,13 @@ MIGRATIONS: dict[int, list[str]] = {
 async def _migration_4(engine: AsyncEngine) -> None:
     """Sticky ban, identity-change notices and auto-approved join requests."""
     await add_column(engine, "chat_settings", "sticky_ban",
-                     "BOOLEAN NOT NULL DEFAULT 1")
+                     "BOOLEAN NOT NULL DEFAULT TRUE")
     await add_column(engine, "chat_settings", "announce_name_change",
-                     "BOOLEAN NOT NULL DEFAULT 1")
+                     "BOOLEAN NOT NULL DEFAULT TRUE")
     await add_column(engine, "chat_settings", "announce_username_change",
-                     "BOOLEAN NOT NULL DEFAULT 1")
+                     "BOOLEAN NOT NULL DEFAULT TRUE")
     await add_column(engine, "chat_settings", "auto_approve_join_requests",
-                     "BOOLEAN NOT NULL DEFAULT 0")
+                     "BOOLEAN NOT NULL DEFAULT FALSE")
 
 
 MIGRATIONS[4] = _migration_4
@@ -55,7 +55,7 @@ MIGRATIONS[4] = _migration_4
 
 async def _migration_5(engine: AsyncEngine) -> None:
     """Group approval flag (opt-in gate for private deployments)."""
-    await add_column(engine, "chats", "is_approved", "BOOLEAN NOT NULL DEFAULT 0")
+    await add_column(engine, "chats", "is_approved", "BOOLEAN NOT NULL DEFAULT FALSE")
 
 
 MIGRATIONS[5] = _migration_5
@@ -111,7 +111,7 @@ MIGRATIONS[10] = _migration_10
 async def _migration_11(engine: AsyncEngine) -> None:
     """Enable optional private notifications for group leave events."""
     await add_column(engine, "chat_settings", "leave_notify_owner",
-                     "BOOLEAN NOT NULL DEFAULT 0")
+                     "BOOLEAN NOT NULL DEFAULT FALSE")
 
 
 MIGRATIONS[11] = _migration_11
@@ -120,7 +120,7 @@ MIGRATIONS[11] = _migration_11
 async def _migration_12(engine: AsyncEngine) -> None:
     """Add explicit per-group AI memory opt-in; preserve already selected AI chats."""
     await add_column(engine, "chat_settings", "ai_agent_enabled",
-                     "BOOLEAN NOT NULL DEFAULT 0")
+                     "BOOLEAN NOT NULL DEFAULT FALSE")
     async with engine.begin() as conn:
         await conn.execute(text(
             "UPDATE chat_settings SET ai_agent_enabled = TRUE "

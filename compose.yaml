@@ -1,0 +1,20 @@
+services:
+  armando:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: armando-group-manager:latest
+    container_name: armando
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

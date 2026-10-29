@@ -27,8 +27,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-TRUE = "1"
-FALSE = "0"
+# SQL boolean literals work in both SQLite and PostgreSQL (unlike integer 1/0).
+TRUE = "TRUE"
+FALSE = "FALSE"
 
 
 class Base(DeclarativeBase):

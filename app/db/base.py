@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from sqlalchemy import event, text
-from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -53,10 +52,12 @@ def create_engine() -> AsyncEngine:
         kwargs["max_overflow"] = max(2, settings.db_pool_size)
         kwargs["pool_pre_ping"] = True
         kwargs["pool_recycle"] = 1800
-    return create_async_engine(url, **kwargs)
+    async_engine = create_async_engine(url, **kwargs)
+    if url.startswith("sqlite"):
+        event.listen(async_engine.sync_engine, "connect", _sqlite_pragmas)
+    return async_engine
 
 
-@event.listens_for(Engine, "connect")
 def _sqlite_pragmas(dbapi_connection, _connection_record):  # pragma: no cover - driver hook
     try:
         cursor = dbapi_connection.cursor()

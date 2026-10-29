@@ -694,7 +694,7 @@ async def on_ai_model(callback: CallbackQuery, session: AsyncSession, bot: Bot) 
             await list_models(force_refresh=True)
             answer = "✅ فهرست زندهٔ مدل‌ها تازه شد."
         except AIGatewayNotConfigured:
-            answer = "⛔️ AI_CHAT_BASE_URL و AI_CHAT_API_KEY را در Railway تنظیم کنید."
+            answer = "⛔️ AI_CHAT_BASE_URL و AI_CHAT_API_KEY را در متغیرهای امن میزبان تنظیم کنید."
         except AIGatewayError:
             answer = "⚠️ فهرست مدل‌ها دریافت نشد؛ کلید و دسترسی API را بررسی کنید."
         await safe_answer(callback, answer, show_alert=answer.startswith(("⛔️", "⚠️")))
@@ -720,7 +720,7 @@ async def on_ai_model(callback: CallbackQuery, session: AsyncSession, bot: Bot) 
         try:
             models = await list_models()
         except AIGatewayNotConfigured:
-            await safe_answer(callback, "⛔️ AI_CHAT_BASE_URL و AI_CHAT_API_KEY را در Railway تنظیم کنید.", show_alert=True)
+            await safe_answer(callback, "⛔️ AI_CHAT_BASE_URL و AI_CHAT_API_KEY را در متغیرهای امن میزبان تنظیم کنید.", show_alert=True)
             return
         except AIGatewayError:
             await safe_answer(callback, "⚠️ فهرست مدل‌ها در دسترس نیست؛ دوباره تازه‌سازی کنید.", show_alert=True)

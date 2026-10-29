@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -27,7 +28,7 @@ def _load_dotenv(path: Path | None = None) -> None:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        # Never override a real environment variable (Railway / Docker style).
+        # Never override a platform-provided or process environment variable.
         os.environ.setdefault(key, value)
 
 
@@ -62,6 +63,7 @@ class Settings:
     # ------------------------------------------------------------------ runtime
     environment: str = "production"  # production | development
     log_level: str = "INFO"
+    log_file_enabled: bool = True
     timezone: str = "Asia/Tehran"
     drop_pending_updates: bool = True
 
@@ -100,7 +102,7 @@ class Settings:
     # ---------------------------------------------------------- MTProto scan
     telegram_api_id: int | None = None
     telegram_api_hash: str = ""
-    # Optional user-authorized MTProto session, stored only as a Railway Secret.
+    # Optional user-authorized MTProto session; store it only as a deployment secret.
     telegram_session_string: str = ""
     deleted_account_scan_interval: int = 86400
     deleted_account_max_pages: int = 500
@@ -167,6 +169,7 @@ class Settings:
             db_pool_size=_as_int(values.get("db_pool_size")) or 10,
             environment=(values.get("environment") or "production").strip(),
             log_level=(values.get("log_level") or "INFO").strip().upper(),
+            log_file_enabled=_as_bool(values.get("log_file_enabled"), True),
             timezone=(values.get("timezone") or "Asia/Tehran").strip(),
             drop_pending_updates=_as_bool(values.get("drop_pending_updates"), True),
             use_webhook=_as_bool(values.get("use_webhook")),
@@ -174,7 +177,9 @@ class Settings:
             webhook_path=(values.get("webhook_path") or "/webhook").strip(),
             webhook_secret=(values.get("webhook_secret") or "armando-secret-change-me").strip(),
             webapp_host=(values.get("webapp_host") or "0.0.0.0").strip(),
-            webapp_port=_as_int(values.get("webapp_port")) or 8080,
+            # Hostless and similar platforms provide PORT at runtime.
+            webapp_port=_as_int(os.environ.get("PORT"))
+            or _as_int(values.get("webapp_port")) or 8080,
             log_chat_id=_as_int(values.get("log_chat_id")),
             error_log_chat_id=_as_int(values.get("error_log_chat_id")),
             redis_url=(values.get("redis_url") or "").strip(),
@@ -246,11 +251,28 @@ class Settings:
 
     @property
     def sqlalchemy_url(self) -> str:
-        url = self.database_url
+        """Normalize managed PostgreSQL URLs for SQLAlchemy's asyncpg driver."""
+        url = self.database_url.strip()
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql+asyncpg://", 1)
-        elif url.startswith("postgresql://") and "+asyncpg" not in url:
+        elif url.startswith("postgresql://"):
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+        # Hostless supplies libpq-style ``sslmode=require``. asyncpg expects
+        # ``ssl=require`` instead; forwarding sslmode raises TypeError.
+        if url.startswith("postgresql+asyncpg://"):
+            parts = urlsplit(url)
+            query = parse_qsl(parts.query, keep_blank_values=True)
+            has_ssl = any(key == "ssl" for key, _ in query)
+            has_sslmode = any(key == "sslmode" for key, _ in query)
+            if has_sslmode:
+                query = [
+                    ("ssl" if key == "sslmode" and not has_ssl else key, value)
+                    for key, value in query if key != "sslmode" or not has_ssl
+                ]
+                url = urlunsplit((
+                    parts.scheme, parts.netloc, parts.path,
+                    urlencode(query), parts.fragment))
         return url
 
     def safe_dict(self) -> dict[str, Any]:

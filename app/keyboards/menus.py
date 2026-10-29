@@ -792,9 +792,9 @@ def _panel_ai_chat(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     ])
 
     if error == "not_configured":
-        lines.extend(["", "⛔️ مدیر ربات باید <code>AI_CHAT_BASE_URL</code> و <code>AI_CHAT_API_KEY</code> را در Railway تنظیم کند؛ مقدار کلید را Secret بگذارد."])
+        lines.extend(["", "⛔️ مدیر ربات باید <code>AI_CHAT_BASE_URL</code> و <code>AI_CHAT_API_KEY</code> را در متغیرهای امن میزبان تنظیم کند."])
     elif error:
-        lines.extend(["", "⚠️ فهرست مدل‌ها از ارائه‌دهندهٔ API دریافت نشد. کلید و دسترسی API را در Railway بررسی و سپس تازه‌سازی کنید."])
+        lines.extend(["", "⚠️ فهرست مدل‌ها از ارائه‌دهندهٔ API دریافت نشد. کلید و دسترسی API میزبان را بررسی و سپس تازه‌سازی کنید."])
     elif models:
         lines.extend(["", f"<b>مدل‌های در دسترس ({len(models)}):</b>"])
         start = page * page_size

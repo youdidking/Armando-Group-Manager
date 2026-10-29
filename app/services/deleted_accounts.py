@@ -62,7 +62,7 @@ class DeletedAccountScanner:
     async def connect(self) -> None:
         if self.session_string:
             # connect() avoids Telethon's interactive login prompt on a bad or
-            # expired Railway Secret.
+            # expired deployment secret.
             await self.client.connect()
         else:
             await self.client.start(bot_token=self.bot_token)
@@ -181,7 +181,7 @@ class DeletedAccountScanner:
         if self.is_bot_session:
             lines.extend([
                 "ℹ️ نشست فعلی MTProto از نوع ربات است؛ دسترسی به فهرست اعضا به محدودیت‌ها و مجوزهای تلگرام بستگی دارد.",
-                "برای پوشش بهتر، نشست یک حساب کاربریِ عضو کانال‌ها را با نام «TELEGRAM_SESSION_STRING» فقط در بخش Secrets راه‌اندازی Railway تنظیم کنید.",
+                "برای پوشش بهتر، نشست یک حساب کاربریِ عضو کانال‌ها را با نام «TELEGRAM_SESSION_STRING» فقط در بخش Secrets میزبان تنظیم کنید.",
             ])
         text = "\n".join(lines)
         owner_id = int(config.settings.owner_id or 0)
