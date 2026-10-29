@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "python",
+  "deploy": {
+    "startCommand": "python -m app.main",
+    "aptPackages": [
+      "ca-certificates",
+      "tzdata",
+      "ffmpeg",
+      "libgl1",
+      "libglib2.0-0",
+      "libgomp1",
+      "libsm6",
+      "libxext6",
+      "libxrender1"
+    ],
+    "variables": {
+      "TZ": "Asia/Tehran",
+      "PYTHONUNBUFFERED": "1"
+    }
+  }
+}

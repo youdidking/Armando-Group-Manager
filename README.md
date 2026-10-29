@@ -1,6 +1,6 @@
 # 🤖 Armando Group Manager — آرماندو
 
-ربات مدیریت گروه تلگرام، **فارسی‌محور** و ماژولار؛ آمادهٔ اجرا با Docker، Hostless Worker یا روی سرور لینوکسی.
+ربات مدیریت گروه تلگرام، **فارسی‌محور** و ماژولار؛ آمادهٔ استقرار خودکار با Hostless Railpack یا روی سرور لینوکسی.
 ساخته‌شده با **Python 3.12+** و **aiogram 3.31** — کد کاملاً اورجینال، بدون کپی از ربات‌های موجود.
 
 > همهٔ متن‌های ربات (دکمه‌ها، پیام‌ها، خطاها، راهنما، پنل، آمار) **فارسی** است.
@@ -75,15 +75,15 @@ python -m app.main
 
 ## 🛰 استقرار روی Hostless Cloud
 
-ربات در حالت Long Polling به‌صورت **Standalone Worker** اجرا می‌شود؛ نیازی به دامنه، وب‌هوک یا پورت عمومی ندارد. راهنمای گام‌به‌گام در [`DEPLOY_HOSTLESS_FA.md`](DEPLOY_HOSTLESS_FA.md) است. Hostless پروژه را از مخزن Git می‌سازد؛ ZIP را ابتدا از حالت فشرده خارج و در یک مخزن خصوصی push کنید.
+ربات در حالت Long Polling به‌صورت **Standalone Worker** اجرا می‌شود؛ نیازی به دامنه، وب‌هوک یا پورت عمومی ندارد. راهنمای [`DEPLOY_HOSTLESS_FA.md`](DEPLOY_HOSTLESS_FA.md) مسیر سادهٔ **Detect automatically / Railpack** را توضیح می‌دهد: مخزن را وصل کنید، متغیرها را در پنل بگذارید و Hostless Python و وابستگی‌های `requirements.txt` را خودکار نصب می‌کند؛ Docker لازم نیست. ZIP را باز و محتوای آن را در مخزن Git خصوصی push کنید.
 
-برای ماندگاری اطلاعات از PostgreSQL مدیریت‌شدهٔ Hostless و متغیر `DATABASE_URL` استفاده کنید؛ تعداد Worker replica را روی **۱** نگه دارید تا چند polling هم‌زمان ایجاد نشود. در پنل Hostless، کلیدها را به‌صورت Secret ثبت کنید.
+برای ماندگاری اطلاعات از PostgreSQL مدیریت‌شدهٔ Hostless و متغیر امن `DATABASE_URL` استفاده کنید؛ تعداد Worker replica را روی **۱** نگه دارید تا چند polling هم‌زمان ایجاد نشود. توکن و اتصال دیتابیس را در پنل Hostless به‌صورت Secret ثبت کنید.
 
 > سهمیهٔ رایگان Hostless بین پروژه‌ها و منابع حساب مشترک است؛ مصرف بیش از سهمیه یا Volume پایدار ممکن است هزینه داشته باشد. پیش از دیپلوی، [جزئیات سهمیه و صورت‌حساب](https://docs.hostless.cloud/billing/costbreakdown) را بررسی کنید.
 
 ## 🐧 استقرار روی سرور لینوکسی شخصی
 
-راهنمای مستقل Docker Compose و نگهداری روی سرور در [`DEPLOY_LINUX_FA.md`](DEPLOY_LINUX_FA.md) آمده است. در این روش SQLite روی پوشهٔ `data/` پایدار می‌ماند و نیازی به بازکردن پورت نیست.
+راهنمای نصب مستقیم و آسان با [`DEPLOY_LINUX_FA.md`](DEPLOY_LINUX_FA.md) آمده است: اسکریپت `install-linux.sh` وابستگی‌ها، محیط مجازی و سرویس systemd را آماده می‌کند؛ تنظیمات در `.env` می‌مانند و SQLite در `data/` پایدار است. Docker و بازکردن پورت لازم نیست.
 
 ---
 
@@ -550,11 +550,12 @@ armando/
 │   ├── handlers/             # لایه تلگرام: ثبت دستورات، پنل، پیام‌ها، خطاها
 │   ├── middlewares/          # نشست دیتابیس، ریت‌لیمیت، ردیابی چت
 │   └── data/                 # داده‌های متنی (لیست کلمات، جوک‌ها، فال حافظ …)
-├── tests/                    # تست‌های pytest (واحد + یکپارچه با تلگرامِ شبیه‌سازی‌شده)
-├── docs/                     # مستندات (فهرست دستورات، معماری)
+├── tests/                    # فقط در checkout توسعه؛ در ZIP عملیاتی نیست
+├── docs/                     # مستندات توسعه؛ در ZIP عملیاتی نیست
 ├── data/                     # دیتابیس (در زیپ منتشر نمی‌شود)
-├── requirements.txt  Procfile  Dockerfile  compose.yaml  runtime.txt
-├── .env.example  .dockerignore
+├── requirements.txt  runtime.txt  Procfile  railpack.json
+├── install-linux.sh
+├── .env.example  .gitignore
 ├── DEPLOY_HOSTLESS_FA.md  DEPLOY_LINUX_FA.md
 └── deploy/armando.service
 ```
