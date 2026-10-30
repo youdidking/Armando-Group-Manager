@@ -10,6 +10,7 @@ conservative notification-oriented approach used by active mention bots.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from aiogram.types import MessageEntity
 from aiogram.types import User as TelegramUser
@@ -38,15 +39,28 @@ MAX_MEMBERS = 1000
 
 HEADER = "📣 فراخوانی اعضا"
 
+MentionMember = tuple[int, str | None]
+MentionBatch = tuple[str, list[MessageEntity]]
 
-def _utf16_len(text: str) -> int:
+
+def _utf16_len(text: str | None) -> int:
     """Telegram counts entity offsets and lengths in UTF-16 code units."""
+    if not text:
+        return 0
     return len(text.encode("utf-16-le")) // 2
 
 
-def mention_text(name: str) -> str:
+def _normalize_visible_name(name: str | None) -> str:
+    """Trim whitespace and keep mention names compact for Telegram."""
+    cleaned = " ".join((name or "").split())
+    if not cleaned:
+        return "عضو"
+    return cleaned[:64]
+
+
+def mention_text(name: str | None) -> str:
     """The visible text of a mention (kept short and on a single line)."""
-    return " ".join((name or "").split())[:64] or "عضو"
+    return _normalize_visible_name(name)
 
 
 def display_name(first_name: str | None, last_name: str | None,
@@ -57,6 +71,26 @@ def display_name(first_name: str | None, last_name: str | None,
     if username:
         return f"@{username}"
     return "عضو"
+
+
+def _as_member(item: object) -> MentionMember | None:
+    """Coerce values from the roster into a validated ``(user_id, name)`` pair."""
+    if item is None:
+        return None
+    try:
+        values = tuple(item)
+    except TypeError:
+        return None
+    if len(values) < 2:
+        return None
+    try:
+        user_id = int(values[0])
+        name = str(values[1]) if values[1] is not None else ""
+    except (TypeError, ValueError):
+        return None
+    if user_id <= 0:
+        return None
+    return user_id, name
 
 
 async def collect(session: AsyncSession, chat_id: int, *,
@@ -72,21 +106,127 @@ async def collect(session: AsyncSession, chat_id: int, *,
         limit = max(0, min(MAX_MEMBERS, int(limit)))
     except (TypeError, ValueError):
         limit = MAX_MEMBERS
+    if limit == 0:
+        return []
+
     members = await roster.known_members(session, chat_id, bot=bot, limit=limit)
     result = await session.execute(
         select(ChatMemberState.user_id).where(
             ChatMemberState.chat_id == chat_id,
             ChatMemberState.mention_opt_out.is_(True)))
     excluded = {int(row[0]) for row in result.all()}
-    members = [(uid, name) for uid, name in members if int(uid) not in excluded]
-    if caller is not None and limit > 0:
-        user_id, name = int(caller[0]), caller[1]
-        if user_id > 0 and user_id not in excluded and not any(uid == user_id for uid, _ in members):
-            # Prefer the command's author without exceeding the roster safety cap.
-            if len(members) >= limit:
-                members = members[:limit - 1]
-            members.insert(0, (user_id, display_name(name, None, None)))
-    return members[:limit]
+
+    seen: set[int] = set()
+    normalized: list[tuple[int, str]] = []
+    for item in members:
+        candidate = _as_member(item)
+        if candidate is None:
+            continue
+        user_id, name = candidate
+        if user_id in excluded or user_id in seen:
+            continue
+        seen.add(user_id)
+        normalized.append((user_id, display_name(name, None, None)))
+
+    if caller is not None:
+        user_id, caller_name = int(caller[0]), caller[1]
+        if user_id > 0 and user_id not in excluded and user_id not in seen:
+            if len(normalized) >= limit:
+                normalized = normalized[: max(limit - 1, 0)]
+            normalized.insert(0, (user_id, display_name(caller_name, None, None)))
+
+    return normalized[:limit]
+
+
+def _prepare_candidates(members: Sequence[object] | list[object], *,
+                        max_candidates: int) -> list[tuple[int, str]]:
+    """Filter and deduplicate candidates in a stable order for batching."""
+    prepared: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for item in members:
+        candidate = _as_member(item)
+        if candidate is None:
+            continue
+        user_id, name = candidate
+        if user_id in seen:
+            continue
+        visible = mention_text(name)
+        prepared.append((user_id, visible))
+        seen.add(user_id)
+        if len(prepared) >= max_candidates:
+            break
+    return prepared
+
+
+def _pack_candidates(candidates: Sequence[tuple[int, str]], *,
+                    per_message: int, max_messages: int,
+                    header_units: int) -> list[list[tuple[int, str]]]:
+    """Group candidate mentions into Telegram-safe chunks."""
+    chunks: list[list[tuple[int, str]]] = []
+    current: list[tuple[int, str]] = []
+    current_units = header_units
+
+    for user_id, visible in candidates:
+        name_units = _utf16_len(visible)
+        added_units = name_units + (1 if current else 0)
+
+        if current and (
+            len(current) >= per_message
+            or current_units + added_units > TELEGRAM_MESSAGE_LIMIT
+        ):
+            chunks.append(current)
+            if len(chunks) >= max_messages:
+                break
+            current = []
+            current_units = header_units
+            added_units = name_units
+
+        if current_units + added_units > TELEGRAM_MESSAGE_LIMIT:
+            logger.warning(
+                "Skipping unfit mention name for user_id=%s (visible=%r, utf16=%s)",
+                user_id, visible, name_units,
+            )
+            continue
+
+        current.append((user_id, visible))
+        current_units += added_units
+    else:
+        if current and len(chunks) < max_messages:
+            chunks.append(current)
+
+    return chunks
+
+
+def _render_batch(chunk: Sequence[tuple[int, str]], *,
+                 number: int, total: int) -> MentionBatch | None:
+    """Render one final message plus its ``text_mention`` entities."""
+    head = HEADER if total <= 1 else f"{HEADER} ({to_persian_digits(f'{number}/{total}')})"
+    text_parts = [f"{head}\n"]
+    offset = _utf16_len(text_parts[0])
+    entities: list[MessageEntity] = []
+
+    for index, (user_id, visible) in enumerate(chunk):
+        if index:
+            text_parts.append(" ")
+            offset += 1
+        visible_length = _utf16_len(visible)
+        entities.append(MessageEntity(
+            type="text_mention",
+            offset=offset,
+            length=visible_length,
+            user=TelegramUser(id=user_id, is_bot=False, first_name=visible[:64]),
+        ))
+        text_parts.append(visible)
+        offset += visible_length
+
+    text = "".join(text_parts)
+    if _utf16_len(text) > TELEGRAM_MESSAGE_LIMIT:
+        logger.error(
+            "Skipping oversized mention batch (%s UTF-16 units); chunk_size=%s",
+            _utf16_len(text), len(chunk),
+        )
+        return None
+    return text, entities
 
 
 def build_batches(members, *, per_message: int = MENTIONS_PER_MESSAGE,
@@ -108,18 +248,7 @@ def build_batches(members, *, per_message: int = MENTIONS_PER_MESSAGE,
         max_messages = MAX_MENTION_MESSAGES
 
     max_candidates = min(MAX_MEMBERS, per_message * max_messages)
-    prepared: list[tuple[int, str]] = []
-    for item in members:
-        try:
-            user_id = int(item[0])
-            name = mention_text(item[1])
-        except (TypeError, ValueError, IndexError):
-            continue
-        if user_id <= 0:
-            continue
-        prepared.append((user_id, name))
-        if len(prepared) >= max_candidates:
-            break
+    prepared = _prepare_candidates(members, max_candidates=max_candidates)
     if not prepared:
         return []
 
@@ -128,63 +257,22 @@ def build_batches(members, *, per_message: int = MENTIONS_PER_MESSAGE,
     reserved_header = (
         f"{HEADER} ({to_persian_digits(f'{max_messages}/{max_messages}')})\n")
     header_units = _utf16_len(reserved_header)
-    chunks: list[list[tuple[int, str]]] = []
-    current: list[tuple[int, str]] = []
-    current_units = header_units
-
-    for user_id, visible in prepared:
-        name_units = _utf16_len(visible)
-        added_units = name_units + (1 if current else 0)
-        if current and (
-            len(current) >= per_message
-            or current_units + added_units > TELEGRAM_MESSAGE_LIMIT
-        ):
-            chunks.append(current)
-            if len(chunks) >= max_messages:
-                break
-            current = []
-            current_units = header_units
-            added_units = name_units
-
-        if current_units + added_units > TELEGRAM_MESSAGE_LIMIT:
-            logger.warning("Skipping unfit mention name for user_id=%s", user_id)
-            continue
-        current.append((user_id, visible))
-        current_units += added_units
-    else:
-        if current and len(chunks) < max_messages:
-            chunks.append(current)
+    chunks = _pack_candidates(
+        prepared,
+        per_message=per_message,
+        max_messages=max_messages,
+        header_units=header_units,
+    )
+    if not chunks:
+        return []
 
     total = len(chunks)
-    out: list[tuple[str, list[MessageEntity]]] = []
+    output: list[tuple[str, list[MessageEntity]]] = []
     for number, chunk in enumerate(chunks, start=1):
-        head = HEADER
-        if total > 1:
-            head = f"{HEADER} ({to_persian_digits(f'{number}/{total}')})"
-        text_parts = [f"{head}\n"]
-        offset = _utf16_len(text_parts[0])
-        entities: list[MessageEntity] = []
-
-        for index, (user_id, visible) in enumerate(chunk):
-            if index:
-                text_parts.append(" ")
-                offset += 1
-            visible_length = _utf16_len(visible)
-            entities.append(MessageEntity(
-                type="text_mention", offset=offset, length=visible_length,
-                user=TelegramUser(id=user_id, is_bot=False, first_name=visible)))
-            text_parts.append(visible)
-            offset += visible_length
-
-        text = "".join(text_parts)
-        if _utf16_len(text) > TELEGRAM_MESSAGE_LIMIT:
-            # This should be unreachable due to the packing budget. Do not send
-            # malformed text/entities if the header format changes later.
-            logger.error("Skipping oversized mention batch (%s UTF-16 units)",
-                         _utf16_len(text))
-            continue
-        out.append((text, entities))
-    return out
+        batch = _render_batch(chunk, number=number, total=total)
+        if batch is not None:
+            output.append(batch)
+    return output
 
 
 def mentioned_ids(batches) -> list[int]:
