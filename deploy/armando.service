@@ -14,6 +14,8 @@ Group=armando
 WorkingDirectory=/opt/armando
 EnvironmentFile=/opt/armando/.env
 Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
 ExecStart=/opt/armando/.venv/bin/python -m app.main
 Restart=always
 RestartSec=10

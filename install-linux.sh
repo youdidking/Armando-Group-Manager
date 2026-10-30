@@ -14,7 +14,7 @@ if [[ "$SCRIPT_DIR" != "$APP_DIR" ]]; then
   exit 1
 fi
 if [[ ! -f "$APP_DIR/requirements.txt" || ! -f "$APP_DIR/deploy/armando.service" ]]; then
-  echo "Project files are missing. Extract the complete deployment ZIP into $APP_DIR." >&2
+  echo "Project files are missing. Clone the complete Git repository into $APP_DIR first." >&2
   exit 1
 fi
 if [[ ! -f /etc/debian_version ]]; then
@@ -24,7 +24,7 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates ffmpeg libgl1 libglib2.0-0 libgomp1 libsm6 libxext6 libxrender1
+apt-get install -y git ca-certificates ffmpeg libgl1 libglib2.0-0 libgomp1 libsm6 libxext6 libxrender1
 
 # Prefer the repository's Python 3.12 runtime; accept newer supported Python versions too.
 PYTHON_BIN=""
@@ -52,12 +52,20 @@ if ! id armando >/dev/null 2>&1; then
   useradd --system --gid armando --home-dir "$APP_DIR" --shell /usr/sbin/nologin armando
 fi
 
+# Keep application source and .git non-writable by the bot account.
+chown -R root:armando "$APP_DIR"
 mkdir -p "$APP_DIR/data" "$APP_DIR/logs"
+chown -R armando:armando "$APP_DIR/data" "$APP_DIR/logs"
+chmod 0750 "$APP_DIR/data" "$APP_DIR/logs"
 if [[ ! -f "$APP_DIR/.env" ]]; then
   install -o armando -g armando -m 0600 "$APP_DIR/.env.example" "$APP_DIR/.env"
+else
+  chown armando:armando "$APP_DIR/.env"
 fi
-chown -R armando:armando "$APP_DIR"
 chmod 0600 "$APP_DIR/.env"
+if [[ -d "$APP_DIR/.venv" ]]; then
+  chown -R armando:armando "$APP_DIR/.venv"
+fi
 
 if [[ ! -x "$APP_DIR/.venv/bin/python" ]] \
   || ! runuser -u armando -- "$APP_DIR/.venv/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then

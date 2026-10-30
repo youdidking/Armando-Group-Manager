@@ -81,7 +81,7 @@ python -m app.main
 
 ## 🐧 استقرار روی سرور لینوکسی شخصی
 
-راهنمای نصب مستقیم و آسان با [`DEPLOY_LINUX_FA.md`](DEPLOY_LINUX_FA.md) آمده است: اسکریپت `install-linux.sh` وابستگی‌ها، محیط مجازی و سرویس systemd را آماده می‌کند؛ تنظیمات در `.env` می‌مانند و SQLite در `data/` پایدار است. بازکردن پورت لازم نیست.
+راهنمای [`DEPLOY_LINUX_FA.md`](DEPLOY_LINUX_FA.md) از آدرس Git مخزن شروع می‌کند: سرور آن را clone می‌کند و `install-linux.sh` وابستگی‌ها، محیط مجازی و systemd را آماده می‌سازد؛ تنظیمات در `.env` و SQLite در `data/` می‌مانند. بازکردن پورت لازم نیست.
 
 ---
 

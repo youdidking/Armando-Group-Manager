@@ -1,33 +1,35 @@
-# ساده‌ترین استقرار آرماندو روی سرور لینوکسی شخصی
+# نصب آسان آرماندو روی سرور لینوکسی با Git
 
-این روش **Docker نمی‌خواهد**: ZIP را روی سرور باز می‌کنید، یک اسکریپت Python و وابستگی‌های سیستم را نصب می‌کند، محیط مجازی و systemd را می‌سازد؛ شما فقط Secretها را در `.env` می‌گذارید و سرویس را روشن می‌کنید. برای نصب آسان، Ubuntu 24.04 LTS را پیشنهاد می‌کنم؛ Debian/Ubuntu دیگری هم قابل استفاده است اگر Python 3.12 یا جدیدتر داشته باشد.
+نیازی به فرستادن ZIP یا کپی فایل‌ها به سرور نیست: سرور مخزن را با `git clone` می‌گیرد و نصب‌کننده بقیهٔ کارها را انجام می‌دهد—نصب وابستگی‌های سیستم، ساخت محیط Python، نصب `requirements.txt` و آماده‌سازی systemd. Docker لازم نیست. ساده‌ترین میزبان پیشنهادی Ubuntu 24.04 LTS است؛ توزیع Debian/Ubuntu باید Python 3.12 یا جدیدتر داشته باشد.
 
-## ۱) انتقال فایل‌ها
+## ۱) کلون‌کردن مخزن و نصب
 
-از رایانهٔ خود فایل را بفرستید و به سرور وصل شوید:
-
-```bash
-scp Armando-Group-Manager-Railway.zip USER@SERVER_IP:/tmp/
-ssh USER@SERVER_IP
-```
-
-روی سرور اجرا کنید:
+به سرور با SSH وصل شوید. `REPOSITORY_URL` را با آدرس واقعی Git مخزن خود عوض کنید:
 
 ```bash
-sudo mkdir -p /opt/armando
-sudo unzip -o /tmp/Armando-Group-Manager-Railway.zip -d /opt/armando
+sudo apt-get update
+sudo apt-get install -y git
+sudo git clone --depth 1 --branch main REPOSITORY_URL /opt/armando
 sudo bash /opt/armando/install-linux.sh
 ```
 
-اسکریپت بسته‌های لازم از جمله Python venv، ffmpeg و کتابخانه‌های رسانه را نصب می‌کند، `requirements.txt` را در `.venv` نصب می‌کند و سرویس systemd را آماده می‌سازد. برای این روش Docker و بازکردن پورت فایروال لازم نیست.
+مثال برای مخزن عمومی:
 
-## ۲) قرار دادن تنظیمات و Secretها
+```bash
+sudo git clone --depth 1 --branch main https://github.com/USERNAME/REPOSITORY.git /opt/armando
+```
+
+اگر مخزن خصوصی است، قبل از `git clone` برای سرور دسترسی فقط‌خواندنی Git تنظیم کنید (مثلاً SSH deploy key). توکن دسترسی را داخل URL، history ترمینال، سورس یا `.env` قرار ندهید.
+
+نصب‌کننده Python venv، ffmpeg و کتابخانه‌های رسانه را نصب می‌کند، سپس `requirements.txt` را نصب و سرویس systemd را آماده می‌کند. کد برنامه و `.git` برای کاربر ربات فقط‌خواندنی می‌مانند؛ فقط `.env`، محیط مجازی، داده و لاگ مجاز به نوشتن هستند.
+
+## ۲) تنظیم توکن و دیتابیس
 
 ```bash
 sudo nano /opt/armando/.env
 ```
 
-اسکریپت `.env.example` را با دسترسی محدود به `.env` کپی می‌کند. فقط مقدارهای لازم را ویرایش کنید و بقیهٔ تنظیمات را نگه دارید:
+نصب‌کننده `.env.example` را با مجوز محدود به `.env` کپی می‌کند. حداقل این موارد را پر کنید:
 
 ```env
 BOT_TOKEN=توکن_واقعی_ربات
@@ -38,9 +40,9 @@ LOG_FILE_ENABLED=true
 TIMEZONE=Asia/Tehran
 ```
 
-فایل `.env` فقط برای کاربر سرویس و مدیر سیستم قابل خواندن است. آن را در Git، ZIP یا پیام‌ها قرار ندهید. SQLite به‌صورت پیش‌فرض در `/opt/armando/data/` می‌ماند و با راه‌اندازی مجدد سرور پاک نمی‌شود.
+فایل `.env` فقط برای کاربر سرویس و مدیر سیستم قابل خواندن است. آن را به Git اضافه نکنید. SQLite در `/opt/armando/data/` ذخیره می‌شود و پس از راه‌اندازی مجدد سرور باقی می‌ماند.
 
-## ۳) روشن‌کردن ربات و دیدن لاگ
+## ۳) روشن‌کردن و بررسی لاگ
 
 پس از ذخیرهٔ توکن و شناسه:
 
@@ -50,11 +52,11 @@ sudo systemctl status armando --no-pager
 sudo journalctl -u armando -f
 ```
 
-با `Ctrl+C` از نمایش زندهٔ لاگ خارج می‌شوید؛ سرویس روشن می‌ماند. بعد از شروع، در تلگرام `/start` بفرستید تا گزارش‌های خصوصی به مالک برسند. systemd ربات را پس از ری‌استارت سرور هم خودکار بالا می‌آورد.
+با `Ctrl+C` از نمایش لاگ خارج می‌شوید؛ سرویس روشن می‌ماند. سرویس پس از ری‌استارت سرور هم خودکار بالا می‌آید. برای Long Polling نیازی به دامنه یا بازکردن پورت ورودی نیست.
 
-## به‌روزرسانی
+## به‌روزرسانی از همان مخزن
 
-برای SQLite، ابتدا نسخهٔ پشتیبان بگیرید و سرویس را متوقف کنید:
+برای SQLite، ابتدا سرویس را متوقف و دیتابیس را پشتیبان‌گیری کنید:
 
 ```bash
 sudo systemctl stop armando
@@ -62,18 +64,16 @@ sudo mkdir -p /opt/armando/backups
 sudo cp /opt/armando/data/armando.sqlite3 "/opt/armando/backups/armando-$(date +%F-%H%M).sqlite3"
 ```
 
-ZIP جدید را به `/tmp/` بفرستید، سپس فایل‌های برنامه را روی نسخهٔ فعلی استخراج و نصب‌کننده را دوباره اجرا کنید:
+سپس آخرین commit را بگیرید و نصب‌کننده را دوباره اجرا کنید:
 
 ```bash
-sudo unzip -o /tmp/Armando-Group-Manager-Railway.zip -d /opt/armando
+sudo git -C /opt/armando pull --ff-only
 sudo bash /opt/armando/install-linux.sh
 sudo systemctl status armando --no-pager
 ```
 
-ZIP شامل `.env` و دیتابیس نیست، پس تنظیمات و داده‌های موجود را جایگزین نمی‌کند. نصب‌کننده وابستگی‌ها را به‌روز می‌کند و اگر `BOT_TOKEN` تنظیم شده باشد سرویس را راه می‌اندازد. اگر PostgreSQL استفاده می‌کنید، قبل از به‌روزرسانی با `pg_dump` نسخهٔ پشتیبان بگیرید.
+`.env`، دیتابیس و نشست‌ها در Git نیستند؛ به‌روزرسانی آن‌ها را جایگزین نمی‌کند. نصب‌کننده وابستگی‌ها را به‌روز می‌کند و اگر `BOT_TOKEN` تنظیم باشد سرویس را راه می‌اندازد. برای PostgreSQL، پیش از به‌روزرسانی با `pg_dump` پشتیبان بگیرید.
 
 ## PostgreSQL اختیاری
 
-برای نصب ساده SQLite کافی است. اگر PostgreSQL دارید، مقدار `DATABASE_URL` را در همان `.env` به URI اتصال تغییر دهید. در نصب مستقیم روی سرور، `localhost` برای PostgreSQL محلی همان میزبان است؛ دیتابیس را بدون نیاز به دسترسی عمومی نگه دارید و از رمز قوی استفاده کنید.
-
-این روش اجرای مستقیم با Python و systemd است؛ Docker لازم نیست.
+SQLite برای نصب ساده کافی است. اگر PostgreSQL دارید، `DATABASE_URL` را در `.env` به URI اتصال تغییر دهید. در نصب مستقیم روی سرور، `localhost` برای PostgreSQL محلی همان میزبان است؛ دسترسی عمومی دیتابیس را باز نگذارید.
