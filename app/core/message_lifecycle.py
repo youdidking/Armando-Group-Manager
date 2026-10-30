@@ -15,7 +15,7 @@ from aiogram.types import Message, MessageId
 from .errors import schedule_delete
 
 logger = logging.getLogger("armando.message_lifecycle")
-GROUP_BOT_MESSAGE_TTL = 30
+GROUP_BOT_MESSAGE_TTL = 80
 _GROUP_TYPES = {"group", "supergroup"}
 _CHAT_TYPE_CACHE_TTL = 15 * 60
 _CHAT_TYPES: dict[int, tuple[str, float]] = {}
