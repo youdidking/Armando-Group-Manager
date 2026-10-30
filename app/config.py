@@ -177,7 +177,7 @@ class Settings:
             webhook_path=(values.get("webhook_path") or "/webhook").strip(),
             webhook_secret=(values.get("webhook_secret") or "armando-secret-change-me").strip(),
             webapp_host=(values.get("webapp_host") or "0.0.0.0").strip(),
-            # Hostless and similar platforms provide PORT at runtime.
+            # Railway and similar platforms provide PORT at runtime.
             webapp_port=_as_int(os.environ.get("PORT"))
             or _as_int(values.get("webapp_port")) or 8080,
             log_chat_id=_as_int(values.get("log_chat_id")),
@@ -258,8 +258,8 @@ class Settings:
         elif url.startswith("postgresql://"):
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-        # Hostless supplies libpq-style ``sslmode=require``. asyncpg expects
-        # ``ssl=require`` instead; forwarding sslmode raises TypeError.
+        # Railway and other providers may supply libpq-style ``sslmode=require``.
+        # asyncpg expects ``ssl=require`` instead; forwarding sslmode raises TypeError.
         if url.startswith("postgresql+asyncpg://"):
             parts = urlsplit(url)
             query = parse_qsl(parts.query, keep_blank_values=True)

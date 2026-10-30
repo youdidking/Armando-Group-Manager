@@ -4,6 +4,7 @@
   "deploy": {
     "startCommand": "python -m app.main",
     "aptPackages": [
+      "...",
       "ca-certificates",
       "tzdata",
       "ffmpeg",

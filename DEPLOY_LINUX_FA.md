@@ -7,7 +7,7 @@
 از رایانهٔ خود فایل را بفرستید و به سرور وصل شوید:
 
 ```bash
-scp Armando-Group-Manager-Hostless.zip USER@SERVER_IP:/tmp/
+scp Armando-Group-Manager-Railway.zip USER@SERVER_IP:/tmp/
 ssh USER@SERVER_IP
 ```
 
@@ -15,7 +15,7 @@ ssh USER@SERVER_IP
 
 ```bash
 sudo mkdir -p /opt/armando
-sudo unzip -o /tmp/Armando-Group-Manager-Hostless.zip -d /opt/armando
+sudo unzip -o /tmp/Armando-Group-Manager-Railway.zip -d /opt/armando
 sudo bash /opt/armando/install-linux.sh
 ```
 
@@ -65,7 +65,7 @@ sudo cp /opt/armando/data/armando.sqlite3 "/opt/armando/backups/armando-$(date +
 ZIP جدید را به `/tmp/` بفرستید، سپس فایل‌های برنامه را روی نسخهٔ فعلی استخراج و نصب‌کننده را دوباره اجرا کنید:
 
 ```bash
-sudo unzip -o /tmp/Armando-Group-Manager-Hostless.zip -d /opt/armando
+sudo unzip -o /tmp/Armando-Group-Manager-Railway.zip -d /opt/armando
 sudo bash /opt/armando/install-linux.sh
 sudo systemctl status armando --no-pager
 ```

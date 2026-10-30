@@ -1,6 +1,6 @@
 # 🤖 Armando Group Manager — آرماندو
 
-ربات مدیریت گروه تلگرام، **فارسی‌محور** و ماژولار؛ آمادهٔ استقرار خودکار با Hostless Railpack یا روی سرور لینوکسی.
+ربات مدیریت گروه تلگرام، **فارسی‌محور** و ماژولار؛ آمادهٔ استقرار خودکار روی Railway یا سرور لینوکسی شخصی.
 ساخته‌شده با **Python 3.12+** و **aiogram 3.31** — کد کاملاً اورجینال، بدون کپی از ربات‌های موجود.
 
 > همهٔ متن‌های ربات (دکمه‌ها، پیام‌ها، خطاها، راهنما، پنل، آمار) **فارسی** است.
@@ -73,17 +73,15 @@ python -m app.main
 
 ---
 
-## 🛰 استقرار روی Hostless Cloud
+## 🚂 استقرار روی Railway
 
-ربات در حالت Long Polling به‌صورت **Standalone Worker** اجرا می‌شود؛ نیازی به دامنه، وب‌هوک یا پورت عمومی ندارد. راهنمای [`DEPLOY_HOSTLESS_FA.md`](DEPLOY_HOSTLESS_FA.md) مسیر سادهٔ **Detect automatically / Railpack** را توضیح می‌دهد: مخزن را وصل کنید، متغیرها را در پنل بگذارید و Hostless Python و وابستگی‌های `requirements.txt` را خودکار نصب می‌کند؛ Docker لازم نیست. ZIP را باز و محتوای آن را در مخزن Git خصوصی push کنید.
+راهنمای [`DEPLOY_RAILWAY_FA.md`](DEPLOY_RAILWAY_FA.md) مسیر سادهٔ GitHub + **Railpack خودکار** را دارد: Railway از `requirements.txt` وابستگی‌ها را نصب می‌کند و با `railpack.json` دستور `python -m app.main` را اجرا می‌کند. ZIP را باز و محتوای آن را در مخزن خصوصی Git بگذارید؛ سپس متغیرها را در سرویس Railway تنظیم کنید. برای Long Polling نیازی به دامنه یا پورت عمومی نیست و باید فقط **یک replica** اجرا شود.
 
-برای ماندگاری اطلاعات از PostgreSQL مدیریت‌شدهٔ Hostless و متغیر امن `DATABASE_URL` استفاده کنید؛ تعداد Worker replica را روی **۱** نگه دارید تا چند polling هم‌زمان ایجاد نشود. توکن و اتصال دیتابیس را در پنل Hostless به‌صورت Secret ثبت کنید.
-
-> سهمیهٔ رایگان Hostless بین پروژه‌ها و منابع حساب مشترک است؛ مصرف بیش از سهمیه یا Volume پایدار ممکن است هزینه داشته باشد. پیش از دیپلوی، [جزئیات سهمیه و صورت‌حساب](https://docs.hostless.cloud/billing/costbreakdown) را بررسی کنید.
+برای ماندگاری داده‌ها، یک PostgreSQL در Railway بسازید و `DATABASE_URL` را به متغیر آن وصل کنید. کلیدها و نشانی دیتابیس را فقط در Variables سرویس نگه دارید.
 
 ## 🐧 استقرار روی سرور لینوکسی شخصی
 
-راهنمای نصب مستقیم و آسان با [`DEPLOY_LINUX_FA.md`](DEPLOY_LINUX_FA.md) آمده است: اسکریپت `install-linux.sh` وابستگی‌ها، محیط مجازی و سرویس systemd را آماده می‌کند؛ تنظیمات در `.env` می‌مانند و SQLite در `data/` پایدار است. Docker و بازکردن پورت لازم نیست.
+راهنمای نصب مستقیم و آسان با [`DEPLOY_LINUX_FA.md`](DEPLOY_LINUX_FA.md) آمده است: اسکریپت `install-linux.sh` وابستگی‌ها، محیط مجازی و سرویس systemd را آماده می‌کند؛ تنظیمات در `.env` می‌مانند و SQLite در `data/` پایدار است. بازکردن پورت لازم نیست.
 
 ---
 
@@ -99,7 +97,7 @@ python -m app.main
 
 اسکن از MTProto می‌خواند و فقط وقتی فیلد رسمی `User.deleted` برابر است، شناسه را هدف می‌گیرد؛ نام نمایشی به‌تنهایی مبنای بن نیست. صفحه‌بندی کانال تا ۵۰۰ صفحهٔ ۲۰۰عضوی (حدود ۱۰۰٬۰۰۰ عضو) پیش‌فرض است و با `DELETED_ACCOUNT_MAX_PAGES` قابل تنظیم است. فهرست اعضا ممکن است به‌خاطر دسترسی، نوع کانال یا محدودیت تلگرام ناقص باشد؛ خطای هر چت به مالک گزارش می‌شود، و موفقیت بن فقط با پاسخ موفق تلگرام ثبت می‌شود.
 
-برای کانال‌هایی که نشست ربات اجازهٔ خواندن فهرست اعضا را ندارد، نشست کاربری MTProto را یک‌بار روی دستگاه مورداعتماد بسازید. فرمان زیر API ID و Hash را در ترمینال می‌گیرد و نشست را چاپ می‌کند؛ خروجی را فقط در بخش Secrets میزبان (از جمله Hostless) با نام `TELEGRAM_SESSION_STRING` ثبت کنید. آن را در پیام، مخزن، `.env.example` یا ZIP نگذارید و حساب را به چت‌های موردنیاز اضافه کنید:
+برای کانال‌هایی که نشست ربات اجازهٔ خواندن فهرست اعضا را ندارد، نشست کاربری MTProto را یک‌بار روی دستگاه مورداعتماد بسازید. فرمان زیر API ID و Hash را در ترمینال می‌گیرد و نشست را چاپ می‌کند؛ خروجی را فقط در Railway Variables به‌صورت Secret یا روی سرور در `.env` محدود با نام `TELEGRAM_SESSION_STRING` ثبت کنید. آن را در پیام، مخزن، `.env.example` یا ZIP نگذارید و حساب را به چت‌های موردنیاز اضافه کنید:
 
 ```bash
 python - <<'PY'
@@ -123,7 +121,7 @@ PY
 ### راه‌اندازی امن
 
 1. از provider دلخواه خود یک API key بگیرید؛ API باید با OpenAI Chat Completions سازگار باشد.
-2. در بخش Variables/Secrets میزبان (برای Hostless: Worker → Environment) این متغیرها را ثبت کنید:
+2. در Railway تب **Variables** سرویس را باز کنید؛ روی سرور شخصی همین متغیرها را در `.env` بگذارید:
    - `AI_CHAT_BASE_URL` — آدرس پایهٔ API. برای TokenRouter می‌توانید `https://api.tokenrouter.com` یا `https://api.tokenrouter.com/v1` بگذارید؛ در حالت دامنهٔ تنها، ربات `/v1` را اضافه می‌کند. مسیرهایی مثل `/chat/completions` را وارد نکنید؛ ربات خودش اضافه می‌کند.
    - `AI_CHAT_API_KEY` — کلید را به‌عنوان **Secret** ثبت کنید؛ در گفتگو، سورس، `.env.example`، ZIP یا لاگ نگذارید.
 3. سرویس را Deploy/Restart کنید. انتخاب مدل پیش‌فرض لازم نیست؛ `AI_CHAT_DEFAULT_MODEL` اختیاری است و فقط برای گفت‌وگوی خصوصی ربات کاربرد دارد.
@@ -556,7 +554,7 @@ armando/
 ├── requirements.txt  runtime.txt  Procfile  railpack.json
 ├── install-linux.sh
 ├── .env.example  .gitignore
-├── DEPLOY_HOSTLESS_FA.md  DEPLOY_LINUX_FA.md
+├── DEPLOY_RAILWAY_FA.md  DEPLOY_LINUX_FA.md
 └── deploy/armando.service
 ```
 
