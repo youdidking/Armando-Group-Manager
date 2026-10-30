@@ -16,7 +16,7 @@ sudo bash /opt/armando/install-linux.sh
 مثال برای مخزن عمومی:
 
 ```bash
-sudo git clone --depth 1 --branch main https://github.com/USERNAME/REPOSITORY.git /opt/armando
+sudo git clone --depth 1 --branch main https://github.com/youdidking/Armando-Group-Manager.git /opt/armando
 ```
 
 اگر مخزن خصوصی است، قبل از `git clone` برای سرور دسترسی فقط‌خواندنی Git تنظیم کنید (مثلاً SSH deploy key). توکن دسترسی را داخل URL، history ترمینال، سورس یا `.env` قرار ندهید.
